@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+
+# VSCode settings
+.vscode/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
+.env
+.env.*
+*.env
+*.env.*
+
+# Flask instance folder
+instance/
+
+# Logs
+*.log
+
+# Docker
+*.pid
+*.tar
+docker-compose.override.yml
+# Ignore Docker volumes if any
+volumes/
+
+# SQLite DB
+*.sqlite3
+
+# Mac / OS trash
+.DS_Store
+.AppleDouble
+.LSOverride
