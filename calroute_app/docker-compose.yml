@@ -20,7 +20,7 @@ services:
       MYSQL_PASSWORD: calroute
       MYSQL_ROOT_PASSWORD: avi1234ben
     volumes:
-      - db_data:/var/lib/mysql
+      - ./init_db:/docker-entrypoint-initdb.d
     ports:
       - "3306:3306"
 
