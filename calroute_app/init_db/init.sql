@@ -42,7 +42,6 @@ CREATE TABLE IF NOT EXISTS schedules (
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
-
 -- ️Routes Table
 CREATE TABLE IF NOT EXISTS routes (
     id INT PRIMARY KEY AUTO_INCREMENT,
@@ -68,3 +67,29 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
  );
+
+INSERT INTO users (full_name, email, phone_number, location, preferences)
+VALUES 
+('Alice Smith', 'alice@example.com', '1234567890', 'Irvine, CA', JSON_OBJECT('theme', 'dark')),
+('Bob Johnson', 'bob@example.com', '0987654321', 'Los Angeles, CA', JSON_OBJECT('notifications', true));
+
+INSERT INTO tasks (user_id, title, description, due_date, priority, status, location)
+VALUES 
+(1, 'Buy groceries', 'Buy fruits and vegetables', '2025-04-12 10:00:00', 'MEDIUM', 'PENDING', 'Trader Joes'),
+(2, 'Meeting with client', 'Discuss Q2 plans', '2025-04-13 14:30:00', 'HIGH', 'PENDING', 'Downtown LA Office');
+
+INSERT INTO schedules (user_id, task_id, scheduled_time, optimized_route_order, status)
+VALUES
+(1, 1, '2025-04-12 09:45:00', 1, 'UPCOMING'),
+(2, 2, '2025-04-13 14:00:00', 1, 'UPCOMING');
+
+INSERT INTO routes (user_id, task_id, origin, destination, travel_mode, estimated_time, distance, route_data)
+VALUES
+(1, 1, 'Irvine, CA', 'Trader Joes, Irvine', 'DRIVING', 15, 5.4, JSON_OBJECT('steps', 'Turn left at Main St, then right at Culver Dr')),
+(2, 2, 'Santa Monica', 'Downtown LA', 'TRANSIT', 45, 18.2, JSON_OBJECT('steps', 'Take Metro E Line to 7th Street/Metro Center'));
+
+
+INSERT INTO notifications (user_id, message, status)
+VALUES 
+(1, 'Your schedule is updated!', 'UNREAD'),
+(2, 'Task reminder: Meeting with client at 2:30 PM', 'UNREAD');
