@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Schedule</title>
+    <link rel="stylesheet" href="/static/css/schedule.css">
+</head>
+<body>
+    <div class="carousel-container">
+        <h1>Welcome, {{ user.name }}!</h1>
+        <div class="task-carousel-vertical">
+            {% for task in user.raw_tasks %}
+                <div class="task-card {% if task.completed %}done{% endif %}">
+                    <button class="edit-btn" onclick="editTask('{{ task.raw_task_id }}')">✏️</button>
+                    <h3>{{ task.title }}</h3>
+                    <p>{{ task.description or "No description" }}</p>
+                    <p><strong>Start:</strong> {{ task.start_time }}</p>
+                    <p><strong>End:</strong> {{ task.end_time }}</p>
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script>
+        function editTask(taskId) {
+            alert('Edit task ' + taskId);
+            // Redirect or open a modal as needed:
+            // window.location.href = `/edit-task/${taskId}`;
+        }
+    </script>
+</body>
+</html>

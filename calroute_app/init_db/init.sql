@@ -1,5 +1,5 @@
 CREATE DATABASE IF NOT EXISTS calroute_db;
-USE calroute_db;
+/*USE calroute_db;
 
 -- Users Table
 CREATE TABLE IF NOT EXISTS users (
@@ -93,3 +93,4 @@ INSERT INTO notifications (user_id, message, status)
 VALUES 
 (1, 'Your schedule is updated!', 'UNREAD'),
 (2, 'Task reminder: Meeting with client at 2:30 PM', 'UNREAD');
+*/
