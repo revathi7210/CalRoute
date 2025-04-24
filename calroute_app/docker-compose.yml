@@ -27,7 +27,7 @@ services:
     volumes:
       - ./init_db:/docker-entrypoint-initdb.d
     ports:
-      - "3307:3306"
+      - "3306:3306"
 
 volumes:
   db_data:
