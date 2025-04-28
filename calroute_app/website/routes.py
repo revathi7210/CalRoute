@@ -1,7 +1,7 @@
 import os
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, render_template, redirect, request, session, url_for
@@ -138,10 +138,26 @@ def fetch_google_calendar_events(user):
         "Authorization": f"Bearer {user.google_access_token}"
     }
 
-    now = datetime.utcnow().isoformat() + "Z"
-    url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    # Set timeMin and timeMax to cover only today's full range
+    today = datetime.utcnow().date()
+    time_min = datetime.combine(today, datetime.min.time()).isoformat() + "Z"
+    time_max = datetime.combine(today, datetime.max.time()).isoformat() + "Z"
+
+    
+    today = datetime.utcnow().date()
+    tomorrow = today + timedelta(days=1)
+
+    time_min = datetime.combine(today, datetime.min.time()).isoformat() + "Z"
+    time_max = datetime.combine(tomorrow, datetime.min.time()).isoformat() + "Z"
+
+    print(today)
+    print(time_min)
+    print(time_max)
+
+    url = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
     params = {
-        'timeMin': now,
+        'timeMin': time_min,
+        'timeMax': time_max,
         'singleEvents': True,
         'orderBy': 'startTime',
         'maxResults': 50
@@ -161,6 +177,8 @@ def fetch_google_calendar_events(user):
         description = event.get("description", "")
         start = event.get("start", {}).get("dateTime")
         end = event.get("end", {}).get("dateTime")
+        # start = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+        # end = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
         location_text = event.get("location")
 
         if not start or not end:
@@ -169,6 +187,8 @@ def fetch_google_calendar_events(user):
         try:
             start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
             end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+            print(start_dt)
+            print(end_dt)
         except Exception as e:
             print(f"Skipping event due to date parsing error: {e}")
             continue
