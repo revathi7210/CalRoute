@@ -1,0 +1,71 @@
+/* Homepage.css */
+.homepage {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+    max-width: 800px;
+    margin: auto;
+  }
+  
+  h1 {
+    text-align: center;
+    font-size: 2.5em;
+    margin-bottom: 20px;
+  }
+  
+  .task-list {
+    display: flex;
+    flex-direction: column;
+  }
+  
+  .task-item {
+    background-color: #f9f9f9;
+    border: 1px solid #ddd;
+    padding: 15px;
+    margin-bottom: 10px;
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .task-info h3 {
+    margin: 0;
+    font-size: 1.2em;
+  }
+  
+  .task-info p {
+    font-size: 1em;
+    color: #555;
+  }
+  
+  .task-actions {
+    display: flex;
+    gap: 10px;
+  }
+  
+  .task-actions button {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  
+  .edit-btn {
+    background-color: #4CAF50;
+    color: white;
+  }
+  
+  .complete-btn {
+    background-color: #FF9800;
+    color: white;
+  }
+  
+  .delete-btn {
+    background-color: #F44336;
+    color: white;
+  }
+  
+  button:hover {
+    opacity: 0.8;
+  }
+  
