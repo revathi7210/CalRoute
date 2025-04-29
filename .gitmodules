@@ -1,0 +1,3 @@
+[submodule "calroute_app/website/calroute_app/frontend_temp/taskflow-navigator-react"]
+	path = calroute_app/website/calroute_app/frontend_temp/taskflow-navigator-react
+	url = https://github.com/sakshikamal/taskflow-navigator-react
