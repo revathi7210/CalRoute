@@ -27,7 +27,7 @@ llm_template = (
     "4. **Direct Data Only:** Your output should contain only the data that is explicitly requested, with no other text.\n"
 )
 
-model = OllamaLLM(model="llama3",  base_url="http://host.docker.internal:11434")
+model = OllamaLLM(model="tinyllama",  base_url="http://52.36.81.221:11434")
 
 # Landing page
 @main.route("/")
