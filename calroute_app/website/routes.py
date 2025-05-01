@@ -1,7 +1,8 @@
 import os
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, time, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, render_template, redirect, request, session, url_for
@@ -138,10 +139,53 @@ def fetch_google_calendar_events(user):
         "Authorization": f"Bearer {user.google_access_token}"
     }
 
-    now = datetime.utcnow().isoformat() + "Z"
-    url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    # Set timeMin and timeMax to cover only today's full range
+    # today = datetime.utcnow().date()
+    # time_min = datetime.combine(today, datetime.min.time()).isoformat() + "Z"
+    # time_max = datetime.combine(today, datetime.max.time()).isoformat() + "Z"
+
+    
+    # today = datetime.utcnow().date()
+    # tomorrow = today + timedelta(days=1)
+
+    # time_min = datetime.combine(today, datetime.min.time()).isoformat() + "Z"
+    # time_max = datetime.combine(tomorrow, datetime.min.time()).isoformat() + "Z"
+
+    # print(today)
+    # print(time_min)
+    # print(time_max)
+
+    # d = datetime(2025, 4, 28).date()
+
+    # # Create a naive datetime at 23:59:59 (PDT)
+    # local_end = datetime.combine(d, time(23, 59, 59))
+
+    # # Since PDT is UTC-7, add 7 hours to convert to UTC
+    # utc_end = local_end + timedelta(hours=7)
+
+    # # Format for Google API
+    # time_max = utc_end.isoformat() + "Z" 
+    local_tz = ZoneInfo("America/Los_Angeles")
+
+    # Get *today* in that zone
+    today_local = datetime.now(local_tz).date()
+
+    # 3. Make a timezone‐aware datetime for 23:59:59 local
+    end_of_day_local = datetime.combine(today_local, time(23, 59, 59), tzinfo=local_tz)
+
+    # 4. Convert it to UTC
+    end_of_day_utc = end_of_day_local.astimezone(timezone.utc)
+
+    # 5. Format for Google API (Zulu)
+    time_max = end_of_day_utc.isoformat().replace("+00:00", "Z")
+
+    print("Local end of day:", end_of_day_local)
+    print("UTC-formatted timeMax:", time_max)
+
+    url = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
     params = {
-        'timeMin': now,
+        'timeMin': '2025-04-28T00:00:00Z',
+        'timeMax': time_max,
         'singleEvents': True,
         'orderBy': 'startTime',
         'maxResults': 50
@@ -161,6 +205,8 @@ def fetch_google_calendar_events(user):
         description = event.get("description", "")
         start = event.get("start", {}).get("dateTime")
         end = event.get("end", {}).get("dateTime")
+        # start = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+        # end = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
         location_text = event.get("location")
 
         if not start or not end:
@@ -169,6 +215,8 @@ def fetch_google_calendar_events(user):
         try:
             start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
             end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+            print(start_dt)
+            print(end_dt)
         except Exception as e:
             print(f"Skipping event due to date parsing error: {e}")
             continue
@@ -233,6 +281,7 @@ def parse_ollama(dom_chunks, parse_description):
     return "\n".join(parsed_results)
 
 def parse_and_store_tasks(user):
+    print("INSIDE PARSER")
     api = TodoistAPI(user.todoist_token)
     try:
         paginator = api.get_tasks()
@@ -249,7 +298,7 @@ def parse_and_store_tasks(user):
   
     for task_list in tasks:
         for task in task_list:
-            # print(task)
+            print(task)
             # print("\n")
             # if "Quick Add" in task.content or "Assign a task" in task.content:
             #     continue
