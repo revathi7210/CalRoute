@@ -8,13 +8,15 @@ from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, render_template, redirect, request, session, url_for
 from .models import User, db ,RawTask,Location
 
+from sqlalchemy.orm import joinedload
+
 from todoist_api_python.api import TodoistAPI
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 
 main = Blueprint('main', __name__)
 
-
+GOOGLE_MAPS_API = os.environ.get("GOOGLE_MAPS_API_ID") 
 TODOIST_API_KEY = os.environ.get("TODOIST_CLIENT_SECRET")  
 
 api = TodoistAPI(TODOIST_API_KEY)
@@ -139,6 +141,8 @@ def fetch_google_calendar_events(user):
         "Authorization": f"Bearer {user.google_access_token}"
     }
 
+    print("INSIDE FETCH GOOGLE CALENDAR")
+
     # Set timeMin and timeMax to cover only today's full range
     local_tz = ZoneInfo("America/Los_Angeles") # GET THIS FROM USER ADDRESS
 
@@ -146,6 +150,7 @@ def fetch_google_calendar_events(user):
     today_local = datetime.now(local_tz).date()
 
     now = datetime.utcnow().isoformat() + "Z"
+    print(now)
 
     # Make a timezone‐aware datetime for 23:59:59 local
     end_of_day_local = datetime.combine(today_local, time(23, 59, 59), tzinfo=local_tz)
@@ -175,15 +180,14 @@ def fetch_google_calendar_events(user):
         return
 
     events = response.json().get("items", [])
-
+    print("EVENTS")
+    print(events)
     for event in events:
         event_id = event.get("id")
         summary = event.get("summary", "No Title")
         description = event.get("description", "")
         start = event.get("start", {}).get("dateTime")
         end = event.get("end", {}).get("dateTime")
-        # start = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
-        # end = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
         location_text = event.get("location")
 
         if not start or not end:
@@ -199,7 +203,10 @@ def fetch_google_calendar_events(user):
             continue
 
         existing = RawTask.query.filter_by(external_id=event_id, source='google_calendar').first()
+        print("EXISTING")
+        print(existing)
         if existing:
+            print("YESSSSSSSSS")
             continue
 
         # Handle location creation
@@ -351,7 +358,41 @@ def parse_and_store_tasks(user):
             db.session.rollback()
             print("Could not insert:", task, e)
 
+# def geocode_address(addr):
+#     """Return (lat, lng) for the given address via Google Geocoding API."""
+#     resp = requests.get(
+#         "https://maps.googleapis.com/maps/api/geocode/json",
+#         params={"address": addr, "key": os.getenv("AIzaSyC_Dz0XtugoW2odkRb-QGaMT96bA0y9YJs")}
+#     )
+#     data = resp.json()
+#     if data.get("results"):
+#         loc = data["results"][0]["geometry"]["location"]
+#         print(loc["lat"])
+#         print(loc["lng"])
+#         return loc["lat"], loc["lng"]
+#     return None, None
+def geocode_address(addr):
+    params = {
+      "address": addr,
+      "key":     GOOGLE_MAPS_API  # or "API_KEY"
+    }
+    resp = requests.get("https://maps.googleapis.com/maps/api/geocode/json?", params=params)
+    print(resp)
+    data = resp.json()
+    print(data)
+    print("GEOCODE REQUEST →", addr)
+    print("PARAMS:", params)
+    print("GEOCODE RESPONSE STATUS:", data.get("status"))
+    if data.get("results"):
+        loc = data["results"][0]["geometry"]["location"]
+        print("→ lat,lng:", loc["lat"], loc["lng"])
+        return loc["lat"], loc["lng"]
+    print("→ no results")
+    return None, None
+
+
 # Protected schedule route
+
 @main.route("/schedule")
 def schedule():
     user_id = session.get("user_id")
@@ -362,7 +403,81 @@ def schedule():
     if not user or not user.google_access_token or not user.todoist_token:
         return redirect(url_for("main.landing"))
 
-    # Import latest Google Calendar events
+    # 1) Pull in calendar + todoist tasks
     fetch_google_calendar_events(user)
     parse_and_store_tasks(user)
-    return render_template("schedule.html", user=user)
+
+    # # 2) Load all RawTask rows (for this user), with their Location
+    # tasks = (
+    #     RawTask.query
+    #            .filter_by(user_id=user.user_id)
+    #            .options(joinedload(RawTask.location))
+    #            .order_by(RawTask.start_time)
+    #            .all()
+    # )
+#     results = (
+#     db.session.query(RawTask, Location.name.label("loc_name"))
+#               .join(Location, RawTask.location_id == Location.location_id)
+#               .filter(RawTask.user_id == user.user_id)
+#               .order_by(RawTask.start_time)
+#               .all()
+# )
+
+# # 2) Unpack into two lists (or one list of dicts)
+#     tasks = []
+#     for raw_task, loc_name in results:
+#         tasks.append({
+#             "task":       raw_task,
+#             "location":   loc_name
+#         })
+#         print(raw_task)
+#         print(loc_name)
+
+#     # 3) Geocode each task.location.name → {lat,lng,title}
+#     task_locations = []
+#     for t in tasks:
+#         if t.location and t.location.name:
+#             lat, lng = geocode_address(t.location.name)
+#             if lat is not None and lng is not None:
+#                 task_locations.append({
+#                     "lat":   lat,
+#                     "lng":   lng,
+#                     "title": t.title
+#                 })
+    results = (
+        db.session.query(RawTask, Location.name.label("loc_name"))
+                  .join(Location, RawTask.location_id == Location.location_id)
+                  .filter(RawTask.user_id == user.user_id)
+                  .order_by(RawTask.start_time)
+                  .all()
+    )
+
+    print(results)
+    # 3) Separate into raw_tasks list & geocode locations
+    raw_tasks = []
+    task_locations = []
+    for raw_task, loc_name in results:
+        raw_tasks.append(raw_task)
+
+        if not loc_name:
+            continue
+
+        lat, lng = geocode_address(loc_name)
+        if lat is None or lng is None:
+            continue
+
+        task_locations.append({
+            "lat":   lat,
+            "lng":   lng,
+            "title": raw_task.title
+        })
+    print(raw_tasks)
+    print(task_locations)
+
+    # 4) Render, passing both user.raw_tasks and the new task_locations array
+    return render_template(
+        "schedule.html",
+        user=user,
+        raw_tasks=raw_tasks,
+        task_locations=task_locations
+    )
