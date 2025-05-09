@@ -1,5 +1,6 @@
 import os
 from flask import Flask
+from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 
@@ -17,8 +18,6 @@ def create_app():
     from .routes import main
     app.register_blueprint(main)
 
-    
-
     db.init_app(app)
     migrate.init_app(app, db)
 
@@ -27,5 +26,9 @@ def create_app():
     # (Optional) If you have an auth blueprint, it might look like this:
     # from .auth import auth
     # app.register_blueprint(auth, url_prefix='/auth')
+
+    CORS(app,
+         supports_credentials=True,
+         resources={r"/*": {"origins": "http://localhost:8080"}})
 
     return app
