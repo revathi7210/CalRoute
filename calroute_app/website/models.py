@@ -52,12 +52,38 @@ class RawTask(db.Model):
 
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
-    pref_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
-    max_daily_hours = db.Column(db.Float, default=8.0)
-    work_start_time = db.Column(db.Time, nullable=True)
-    work_end_time = db.Column(db.Time, nullable=True)
-    travel_mode = db.Column(db.Enum('driving', 'walking', 'transit', name='travel_mode'), default='driving')
+    pref_id      = db.Column(db.Integer, primary_key=True)
+    user_id      = db.Column(
+                      db.Integer,
+                      db.ForeignKey('users.user_id', ondelete='CASCADE'),
+                      nullable=False
+                   )
+    max_daily_hours    = db.Column(db.Float, default=8.0)
+    # work hours
+    work_start_time    = db.Column(db.Time, nullable=True)
+    work_end_time      = db.Column(db.Time, nullable=True)
+
+    # travel mode & prioritization
+    travel_mode        = db.Column(
+                            db.Enum('car','bike','bus_train','walking','rideshare',
+                                    name='travel_mode'),
+                            default='car', nullable=False
+                         )
+    prioritization_style = db.Column(
+                              db.Enum('important_first','quick_wins','balanced',
+                                      name='prioritization_style'),
+                              default='balanced', nullable=False
+                           )
+
+    # home address + geo
+    home_address       = db.Column(db.String(256), nullable=True)
+    home_lat           = db.Column(db.Float,       nullable=True)
+    home_lng           = db.Column(db.Float,       nullable=True)
+
+    favorite_store_address = db.Column(db.String(256), nullable=True)
+    favorite_store_lat     = db.Column(db.Float,       nullable=True)
+    favorite_store_lng     = db.Column(db.Float,       nullable=True)
+
 
 # ---------- User Habits ----------
 
