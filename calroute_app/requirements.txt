@@ -8,5 +8,8 @@ cryptography
 langchain
 langchain_ollama
 todoist-api-python
+googlemaps
+ortools
+flask-cors
 
 # Flask-Dance==5.0.0

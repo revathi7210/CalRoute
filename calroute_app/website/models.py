@@ -1,5 +1,5 @@
 from flask_sqlalchemy import SQLAlchemy
-from . import db
+from .extensions import db
 
 # ---------- Core Entities ----------
 class User(db.Model):

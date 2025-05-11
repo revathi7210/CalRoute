@@ -1,11 +1,9 @@
 import os
 from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
+from .optimize_routes import optimize_bp
 
-
-db = SQLAlchemy()
-migrate = Migrate()
+from .extensions import db, migrate
+from flask_cors import CORS
 
 def create_app():
     # Initialize the Flask app
@@ -13,16 +11,17 @@ def create_app():
     # app.config['SECRET_KEY'] = 'your_secret_key_here'  # needed for sessions, etc.
 
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ['SQLALCHEMY_DATABASE_URI']
-    # Register Blueprints
+    
+    CORS(app, supports_credentials=True)
+
     from .routes import main
     app.register_blueprint(main)
-
+    app.register_blueprint(optimize_bp)
     
-
     db.init_app(app)
     migrate.init_app(app, db)
 
-    from . import models 
+    from . import models
 
     # (Optional) If you have an auth blueprint, it might look like this:
     # from .auth import auth

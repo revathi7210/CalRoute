@@ -5,14 +5,16 @@ from datetime import datetime, timedelta, time, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.exc import IntegrityError
-from flask import Blueprint, render_template, redirect, request, session, url_for
-from .models import User, db ,RawTask,Location
+from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify
+from .models import User, db ,RawTask,Location, ScheduledTask
 
 from sqlalchemy.orm import joinedload
 
 from todoist_api_python.api import TodoistAPI
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
+
+from .optimize_routes import run_optimization
 
 main = Blueprint('main', __name__)
 
@@ -52,6 +54,8 @@ def login_google():
 # Google callback
 @main.route("/login/google/callback")
 def callback_google():
+    session.clear()
+
     code = request.args.get('code')
     if not code:
         return "Authorization failed", 400
@@ -202,11 +206,17 @@ def fetch_google_calendar_events(user):
             print(f"Skipping event due to date parsing error: {e}")
             continue
 
-        existing = RawTask.query.filter_by(external_id=event_id, source='google_calendar').first()
-        print("EXISTING")
-        print(existing)
+        existing = RawTask.query.filter(
+            (RawTask.source == 'google_calendar') & (
+                (RawTask.external_id == event_id) |
+                (
+                    (RawTask.user_id == user.user_id) &
+                    (RawTask.start_time == start_dt) &
+                    (RawTask.end_time == end_dt)
+                )
+            )
+        ).first()
         if existing:
-            print("YESSSSSSSSS")
             continue
 
         # Handle location creation
@@ -214,10 +224,21 @@ def fetch_google_calendar_events(user):
         if location_text:
             location_obj = Location.query.filter_by(user_id=user.user_id, name=location_text).first()
             if not location_obj:
+                lat, lng = geocode_address(location_text)
+
+                if lat is None or lng is None:
+                    print(f"⚠️ Skipping location: '{location_text}' could not be geocoded.")
+                    continue  # skip adding this task altogether if geocode fails
+
                 location_obj = Location(
+                    # NEED TO ADD A LOCATION ID HERE, NO NEED FOR USER_ID 
                     user_id=user.user_id,
-                    name=location_text
+                    name=location_text,
+                    latitude=lat,
+                    longitude=lng,
+                    address=location_text
                 )
+
                 db.session.add(location_obj)
                 try:
                     db.session.flush()  # Ensure location_obj.id is available
@@ -225,6 +246,7 @@ def fetch_google_calendar_events(user):
                     db.session.rollback()
                     print("Duplicate location or DB error occurred.")
                     continue
+
 
         task = RawTask(
             user_id=user.user_id,
@@ -357,24 +379,12 @@ def parse_and_store_tasks(user):
         except Exception as e:
             db.session.rollback()
             print("Could not insert:", task, e)
+    print("Done with parser")
 
-# def geocode_address(addr):
-#     """Return (lat, lng) for the given address via Google Geocoding API."""
-#     resp = requests.get(
-#         "https://maps.googleapis.com/maps/api/geocode/json",
-#         params={"address": addr, "key": os.getenv("AIzaSyC_Dz0XtugoW2odkRb-QGaMT96bA0y9YJs")}
-#     )
-#     data = resp.json()
-#     if data.get("results"):
-#         loc = data["results"][0]["geometry"]["location"]
-#         print(loc["lat"])
-#         print(loc["lng"])
-#         return loc["lat"], loc["lng"]
-#     return None, None
 def geocode_address(addr):
     params = {
       "address": addr,
-      "key":     GOOGLE_MAPS_API  # or "API_KEY"
+      "key":     GOOGLE_MAPS_API
     }
     resp = requests.get("https://maps.googleapis.com/maps/api/geocode/json?", params=params)
     print(resp)
@@ -407,77 +417,137 @@ def schedule():
     fetch_google_calendar_events(user)
     parse_and_store_tasks(user)
 
-    # # 2) Load all RawTask rows (for this user), with their Location
-    # tasks = (
-    #     RawTask.query
-    #            .filter_by(user_id=user.user_id)
-    #            .options(joinedload(RawTask.location))
-    #            .order_by(RawTask.start_time)
-    #            .all()
+    # results = (
+    #     db.session.query(RawTask, Location.name.label("loc_name"))
+    #               .join(Location, RawTask.location_id == Location.location_id)
+    #               .filter(RawTask.user_id == user.user_id)
+    #               .order_by(RawTask.start_time)
+    #               .all()
     # )
-#     results = (
-#     db.session.query(RawTask, Location.name.label("loc_name"))
-#               .join(Location, RawTask.location_id == Location.location_id)
-#               .filter(RawTask.user_id == user.user_id)
-#               .order_by(RawTask.start_time)
-#               .all()
-# )
 
-# # 2) Unpack into two lists (or one list of dicts)
-#     tasks = []
-#     for raw_task, loc_name in results:
-#         tasks.append({
-#             "task":       raw_task,
-#             "location":   loc_name
-#         })
-#         print(raw_task)
-#         print(loc_name)
+    # print(results)
+    # # 3) Separate into raw_tasks list & geocode locations
+    # raw_tasks = []
+    # task_locations = []
+    # for raw_task, loc_name in results:
+    #     raw_tasks.append(raw_task)
 
-#     # 3) Geocode each task.location.name → {lat,lng,title}
-#     task_locations = []
-#     for t in tasks:
-#         if t.location and t.location.name:
-#             lat, lng = geocode_address(t.location.name)
-#             if lat is not None and lng is not None:
-#                 task_locations.append({
-#                     "lat":   lat,
-#                     "lng":   lng,
-#                     "title": t.title
-#                 })
+    #     if not loc_name:
+    #         continue
+
+    #     lat, lng = geocode_address(loc_name)
+    #     if lat is None or lng is None:
+    #         continue
+
+    #     task_locations.append({
+    #         "lat":   lat,
+    #         "lng":   lng,
+    #         "title": raw_task.title
+    #     })
+    # print(raw_tasks)
+    # print(task_locations)
+
+    try:
+        run_optimization(user)
+    except Exception as e:
+        print("inside /scheudule")
+        print("❌ Optimization error:", e)
+
     results = (
-        db.session.query(RawTask, Location.name.label("loc_name"))
-                  .join(Location, RawTask.location_id == Location.location_id)
-                  .filter(RawTask.user_id == user.user_id)
-                  .order_by(RawTask.start_time)
-                  .all()
+        db.session.query(ScheduledTask, Location)
+        .join(Location, ScheduledTask.location_id == Location.location_id)
+        .filter(ScheduledTask.user_id == user.user_id)
+        .order_by(ScheduledTask.scheduled_start_time)
+        .all()
     )
 
-    print(results)
-    # 3) Separate into raw_tasks list & geocode locations
-    raw_tasks = []
-    task_locations = []
-    for raw_task, loc_name in results:
-        raw_tasks.append(raw_task)
+    task_locations = [
+        {
+            "lat": location.latitude,
+            "lng": location.longitude,
+            "title": sched_task.title
+        }
+        for sched_task, location in results if location.latitude and location.longitude
+    ]
 
-        if not loc_name:
-            continue
-
-        lat, lng = geocode_address(loc_name)
-        if lat is None or lng is None:
-            continue
-
-        task_locations.append({
-            "lat":   lat,
-            "lng":   lng,
-            "title": raw_task.title
-        })
-    print(raw_tasks)
-    print(task_locations)
-
-    # 4) Render, passing both user.raw_tasks and the new task_locations array
     return render_template(
         "schedule.html",
         user=user,
-        raw_tasks=raw_tasks,
+        raw_tasks=[],  # or ScheduledTask.query.filter_by(user_id=user.user_id).all() if needed
         task_locations=task_locations
     )
+
+@main.route("/api/tasks", methods=["GET"])
+def get_scheduled_tasks():
+    user_id = session.get("user_id")
+    if not user_id:
+        return redirect("/login/google")
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # Trigger schedule logic before returning tasks
+    fetch_google_calendar_events(user)
+    parse_and_store_tasks(user)
+    try:
+        run_optimization(user)
+    except Exception as e:
+        print("inside /api/tasks")
+        print("❌ Optimization error:", e)
+
+    results = (
+        db.session.query(ScheduledTask, Location)
+        .join(Location, ScheduledTask.location_id == Location.location_id)
+        .filter(ScheduledTask.user_id == user_id)
+        .order_by(ScheduledTask.scheduled_start_time)
+        .all()
+    )
+
+    tasks = []
+    for task, loc in results:
+        tasks.append({
+            "id": task.sched_task_id,
+            "title": task.title,
+            "start_time": task.scheduled_start_time.strftime("%-I:%M %p"),
+            "end_time": task.scheduled_end_time.strftime("%-I:%M %p"),
+            "lat": loc.latitude,
+            "lng": loc.longitude,
+        })
+
+    return jsonify({"tasks": tasks})
+
+@main.route("/me")
+def me():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 401
+
+    # Validate required tokens
+    if not user.google_access_token or not user.todoist_token:
+        return jsonify({"error": "Missing tokens"}), 401
+    
+
+    print(user)
+
+    return jsonify({
+        "id": user.user_id,
+        "name": user.name,
+        "email": user.email,
+        "todoist_token": user.todoist_token,
+        "google_token": user.google_access_token,  
+    })
+
+@main.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return jsonify({"success": True})
+
+@main.route("/reset")
+def reset():
+    session.clear()
+    return "Session cleared."
