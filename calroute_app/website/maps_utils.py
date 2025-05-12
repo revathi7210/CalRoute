@@ -25,7 +25,7 @@ def build_distance_matrix(locations, mode="driving"):
         matrix.append(row)
     return matrix
 
-def solve_tsp(distance_matrix, task_durations, time_windows):
+def solve_tsp(distance_matrix, task_durations, time_windows, start_index, end_index):
     n = len(distance_matrix)
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
@@ -57,7 +57,7 @@ def solve_tsp(distance_matrix, task_durations, time_windows):
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_params.time_limit.seconds = 3
+    search_params.time_limit.seconds = 10
 
     print("Solving TSP with time windows...")
     solution = routing.SolveWithParameters(search_params)

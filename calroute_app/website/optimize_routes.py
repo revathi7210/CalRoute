@@ -1,12 +1,14 @@
-from flask import Blueprint, session, jsonify
+# File: optimize_routes.py
+
+from flask import Blueprint, session, request, jsonify
 from datetime import datetime, timedelta, time
 from .extensions import db
 from .models import RawTask, ScheduledTask, Location, User
-from .maps_utils import build_distance_matrix
-from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+from .maps_utils import build_distance_matrix, solve_tsp
 
 optimize_bp = Blueprint("optimize", __name__)
 
+# --- Morning Schedule (default from home) ---
 @optimize_bp.route("/api/optimize_schedule", methods=["POST"])
 def optimize_schedule():
     user_id = session.get("user_id")
@@ -23,8 +25,140 @@ def optimize_schedule():
 
     return jsonify({"success": True, "message": "Schedule optimized."})
 
+# --- Dynamic Schedule (re-optimization with current location) ---
+@optimize_bp.route("/api/dynamic_schedule", methods=["POST"])
+def dynamic_schedule():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
 
-def run_optimization(user):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    lat = request.json.get("lat")
+    lng = request.json.get("lng")
+    print(lat)
+    print(lng)
+
+    if lat is None or lng is None:
+        return jsonify({"error": "Current location required"}), 400
+
+    success = run_optimization(user, current_lat=lat, current_lng=lng)
+    if not success:
+        return jsonify({"error": "Could not generate updated route"}), 500
+
+    return jsonify({"success": True, "message": "Route re-optimized from current location."})
+
+# # --- Core Optimization Logic ---
+# def run_optimization(user, current_lat=None, current_lng=None):
+#     now = datetime.now()
+#
+#     raw_query = (
+#         db.session.query(RawTask, Location)
+#         .join(Location, RawTask.location_id == Location.location_id)
+#         .filter(RawTask.user_id == user.user_id)
+#         .filter(Location.user_id == user.user_id)
+#     )
+#
+#     tasks_with_locations = [
+#         (task, loc)
+#         for (task, loc) in raw_query.all()
+#         if not task.end_time or task.end_time >= now
+#     ]
+#
+#     if not tasks_with_locations:
+#         print("No tasks with valid upcoming times found.")
+#         return False
+#
+#     # Use home as end node (from preference table later)
+#     home_address = "Verano Place, Irvine, CA"
+#     locations = []
+#     durations = []
+#     time_windows = []
+#
+#     if current_lat and current_lng:
+#         locations.append({"lat": current_lat, "lng": current_lng, "title": "Current Location"})
+#         durations.append(0)
+#         time_windows.append((now.hour * 60 + now.minute, 1440))
+#
+#     for task, loc in tasks_with_locations:
+#         if ScheduledTask.query.filter_by(raw_task_id=task.raw_task_id, status="completed").first():
+#             continue  # skip completed tasks
+#         locations.append(loc.address)
+#         duration = int((task.end_time - task.start_time).total_seconds() // 60) if task.start_time and task.end_time else 30
+#         durations.append(duration)
+#
+#         if task.priority == 1 and task.start_time and task.end_time:
+#             start = task.start_time.hour * 60 + task.start_time.minute
+#             end = task.end_time.hour * 60 + task.end_time.minute
+#         else:
+#             start, end = 0, 1440  # flexible if not strict priority 1
+#         time_windows.append((start, end))
+#
+#     locations.append(home_address)
+#     durations.append(0)
+#     time_windows.append((0, 1440))
+#
+#     # Get distance matrix
+#     address_list = [f"{loc['lat']},{loc['lng']}" if isinstance(loc, dict) else loc for loc in locations]
+#     distance_matrix = build_distance_matrix(address_list)
+#
+#     route = solve_tsp(distance_matrix, durations, time_windows)
+#     if not route:
+#         return False
+#
+#     ScheduledTask.query.filter_by(user_id=user.user_id, status="pending").delete()
+#     db.session.commit()
+#
+#     current_time = now
+#     for idx in route:
+#         if idx >= len(tasks_with_locations) + (1 if current_lat else 0):
+#             continue  # skip home
+#
+#         offset = 1 if current_lat else 0
+#         task_idx = idx - offset
+#         if task_idx < 0:
+#             continue  # current location
+#         raw, _ = tasks_with_locations[task_idx]
+#
+#         dur = timedelta(minutes=int(durations[idx]))
+#         sched = ScheduledTask(
+#             user_id=user.user_id,
+#             raw_task_id=raw.raw_task_id,
+#             title=raw.title,
+#             description=raw.description,
+#             location_id=raw.location_id,
+#             scheduled_start_time=current_time,
+#             scheduled_end_time=current_time + dur,
+#             status="pending",
+#             priority=raw.priority,
+#             travel_eta_minutes=0
+#         )
+#         db.session.add(sched)
+#         current_time += dur
+#
+#     db.session.commit()
+#     print("✅ Schedule stored.")
+#     return True
+
+import requests
+
+def reverse_geocode_osm(lat: float, lng: float) -> str | None:
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {
+        "lat": lat,
+        "lon": lng,
+        "format": "jsonv2",
+    }
+    resp = requests.get(url, params=params, headers={"User-Agent": "CalRoute/1.0"}).json()
+    return resp.get("display_name")
+
+
+# → "Google Building 41, Amphitheatre Parkway, Mountain View, Santa Clara County, California, 94043, United States"
+
+
+def run_optimization(user, current_lat=None, current_lng=None):
     from .maps_utils import build_distance_matrix
     from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
@@ -45,20 +179,36 @@ def run_optimization(user):
 
     home_address = "Verano Place, Irvine, CA"
     home_already_present = any("verano place" in loc.address.lower() for _, loc in tasks_with_locations)
+    now = datetime.now()
 
-    locations = [loc.address for _, loc in tasks_with_locations]
-    durations = [
-        int((task.end_time - task.start_time).total_seconds() // 60)
-        if task.end_time and task.start_time else 30
-        for task, _ in tasks_with_locations
-    ]
-    time_windows = [
-        (
-            task.start_time.hour * 60 + task.start_time.minute if task.start_time else 0,
-            task.end_time.hour * 60 + task.end_time.minute if task.end_time else 1440
-        )
-        for task, _ in tasks_with_locations
-    ]
+    locations = []
+    durations = []
+    time_windows = []
+
+    # 1) current-location first
+    if current_lat and current_lng:
+        current_loc = reverse_geocode_osm(current_lat, current_lng)
+        print("current_loc:", current_loc)
+        locations.append(current_loc)
+        durations.append(0)
+        time_windows.append((now.hour * 60 + now.minute, 1440))
+
+    # 2) then each task
+    for task, loc in tasks_with_locations:
+        locations.append(loc.address)
+
+        # duration in minutes (or a default)
+        if task.start_time and task.end_time:
+            delta = task.end_time - task.start_time
+            dur = int(delta.total_seconds() // 60)
+        else:
+            dur = 30
+        durations.append(dur)
+
+        # time window
+        start_min = (task.start_time.hour * 60 + task.start_time.minute) if task.start_time else 0
+        end_min = (task.end_time.hour * 60 + task.end_time.minute) if task.end_time else 1440
+        time_windows.append((start_min, end_min))
 
     if not home_already_present:
         locations.append(home_address)
@@ -80,55 +230,13 @@ def run_optimization(user):
 
     start_index = 0
     end_index = n - 1 if not home_already_present else 0
-    manager = pywrapcp.RoutingIndexManager(n, 1, [start_index], [end_index])
-    routing = pywrapcp.RoutingModel(manager)
-
-    def time_callback(from_index, to_index):
-        return distance_matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
-
-    transit_index = routing.RegisterTransitCallback(time_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
-
-    routing.AddDimension(
-        transit_index,
-        120,
-        1440,
-        False,
-        "Time"
-    )
-    time_dim = routing.GetDimensionOrDie("Time")
-
-    for i in range(n):
-        idx = manager.NodeToIndex(i)
-        time_dim.SlackVar(idx).SetValue(int(durations[i]))
-        start, end = time_windows[i]
-        print(f"[{i}] Duration: {durations[i]}, TimeWindow: ({start}, {end})")
-        time_dim.CumulVar(idx).SetRange(start, end)
-
-    for i in range(1, n if home_already_present else n - 1):
-        routing.AddDisjunction([manager.NodeToIndex(i)], 1000)
-
-    search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
-    search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_params.time_limit.seconds = 10
-
-    print("🧠 Solving TSP...")
-    solution = routing.SolveWithParameters(search_params)
-    if not solution:
-        print("❌ No feasible route found.")
-        return False
-
-    route = []
-    index = routing.Start(0)
-    while not routing.IsEnd(index):
-        route.append(manager.IndexToNode(index))
-        index = solution.Value(routing.NextVar(index))
-    route.append(manager.IndexToNode(index))
+    route = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows, start_index=start_index, end_index=end_index)
 
     ScheduledTask.query.filter_by(user_id=user.user_id).delete()
     db.session.commit()
 
+    print("tasksloc")
+    print(tasks_with_locations)
     current_time = datetime.combine(datetime.now().date(), time(8, 0))
     for idx in route:
         if idx >= len(tasks_with_locations):

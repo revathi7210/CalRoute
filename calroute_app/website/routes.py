@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify
 
 from .models import User, db, RawTask, Location, UserPreference
-from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify
+from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify,  current_app
 from .models import User, db ,RawTask,Location, ScheduledTask
 
 from sqlalchemy.orm import joinedload
@@ -505,15 +505,21 @@ def get_scheduled_tasks():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    # Trigger schedule logic before returning tasks
-    fetch_google_calendar_events(user)
-    parse_and_store_tasks(user)
-    try:
-        run_optimization(user)
-    except Exception as e:
-        print("inside /api/tasks")
-        print("❌ Optimization error:", e)
+    # 1) If there are no existing scheduled tasks, run your scheduler
+    existing_count = ScheduledTask.query.filter_by(user_id=user_id).count()
+    if existing_count == 0:
+        current_app.logger.debug(f"No scheduled tasks for user {user_id}. Generating schedule...")
+        try:
+            fetch_google_calendar_events(user)
+            parse_and_store_tasks(user)
+            # If you have an optimization step, run it here
+            run_optimization(user)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.error(f"Error scheduling tasks for user {user_id}: {e}")
 
+    # 2) Now fetch the scheduled tasks
     results = (
         db.session.query(ScheduledTask, Location)
         .join(Location, ScheduledTask.location_id == Location.location_id)
@@ -525,15 +531,15 @@ def get_scheduled_tasks():
     tasks = []
     for task, loc in results:
         tasks.append({
-            "id": task.sched_task_id,
-            "title": task.title,
+            "id":         task.sched_task_id,
+            "title":      task.title,
             "start_time": task.scheduled_start_time.strftime("%-I:%M %p"),
-            "end_time": task.scheduled_end_time.strftime("%-I:%M %p"),
-            "lat": loc.latitude,
-            "lng": loc.longitude,
+            "end_time":   task.scheduled_end_time.strftime("%-I:%M %p"),
+            "lat":        loc.latitude,
+            "lng":        loc.longitude,
         })
 
-    return jsonify({"tasks": tasks})
+    return jsonify({ "tasks": tasks })
 
 
 # “Who am I?” endpoint for React
@@ -605,3 +611,4 @@ def save_preferences():
     db.session.commit()
 
     return jsonify({"message": "Preferences saved"}), 200
+
