@@ -54,10 +54,41 @@ class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
     pref_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
+
     max_daily_hours = db.Column(db.Float, default=8.0)
     work_start_time = db.Column(db.Time, nullable=True)
     work_end_time = db.Column(db.Time, nullable=True)
-    travel_mode = db.Column(db.Enum('driving', 'walking', 'transit', name='travel_mode'), default='driving')
+
+    travel_mode = db.Column(
+        db.Enum('driving', 'walking', 'transit', name='travel_mode'),
+        default='driving'
+    )
+
+    # NEW fields to link to Location table
+    home_location_id = db.Column(
+        db.Integer,
+        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
+        nullable=True
+    )
+    favorite_store_location_id = db.Column(
+        db.Integer,
+        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
+        nullable=True
+    )
+
+    # Relationships to Location model
+    home_location = db.relationship(
+        'Location',
+        foreign_keys=[home_location_id],
+        backref='user_preference_home',
+        lazy=True
+    )
+    favorite_store_location = db.relationship(
+        'Location',
+        foreign_keys=[favorite_store_location_id],
+        backref='user_preference_store',
+        lazy=True
+    )
 
 # ---------- User Habits ----------
 

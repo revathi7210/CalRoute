@@ -8,5 +8,15 @@ cryptography
 langchain
 langchain_ollama
 todoist-api-python
+# Google Maps API
+googlemaps==4.10.0
 
+# OR-Tools for routing optimization
+ortools==9.6.2534
+
+google-generativeai>=0.5.0
+
+# For data handling
+numpy==1.24.3
+pandas==2.0.3
 # Flask-Dance==5.0.0

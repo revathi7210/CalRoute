@@ -14,7 +14,10 @@ RUN apt-get update && apt-get install -y default-mysql-client && rm -rf /var/lib
 # Install dependencies:
 # - Copy and install requirements (prepare a requirements.txt with Flask, Flask-SQLAlchemy, PyMySQL etc.)
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --use-deprecated=legacy-resolver -r requirements.txt && \
+    pip install google-ai-generativelanguage && \
+    pip uninstall -y google-cloud-aiplatform google-cloud-generativelanguage google-ai-generativelanguage google-api-core google-cloud-core || true && \
+    pip install google-generativeai
 
 # Copy entire project into working directory
 COPY . /app/

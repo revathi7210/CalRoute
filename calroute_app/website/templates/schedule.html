@@ -4,12 +4,54 @@
     <meta charset="UTF-8">
     <title>Schedule</title>
     <link rel="stylesheet" href="/static/css/schedule.css">
-     <style>
-    #map {
-      height: 100vh;
-      width: 100%;
-    }
-  </style>
+    <style>
+        /* Basic styles in case schedule.css is not loaded */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+        }
+        .carousel-container {
+            width: 40%;
+            height: 100vh;
+            overflow-y: auto;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h1 {
+            margin-top: 0;
+            color: #333;
+        }
+        .task-carousel-vertical {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .task-card {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            position: relative;
+        }
+        .task-card.done {
+            background-color: #e8f5e9;
+        }
+        .edit-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #map {
+            height: 100vh;
+            width: 60%;
+        }
+    </style>
 </head>
 <body>
     <div class="carousel-container">
@@ -19,9 +61,27 @@
                 <div class="task-card {% if task.completed %}done{% endif %}">
                     <button class="edit-btn" onclick="editTask('{{ task.raw_task_id }}')">✏️</button>
                     <h3>{{ task.title }}</h3>
-                    <p>{{ task.description or "No description" }}</p>
-                    <p><strong>Start:</strong> {{ task.start_time }}</p>
-                    <p><strong>End:</strong> {{ task.end_time }}</p>
+                    {% if task.description %}
+                        <p>{{ task.description }}</p>
+                    {% endif %}
+                    {% if task.start_time %}
+                        <p><strong>Start:</strong> {{ task.start_time.astimezone(task.start_time.tzinfo).strftime('%I:%M %p') }}</p>
+                    {% endif %}
+                    {% if task.end_time %}
+                        <p><strong>End:</strong> {{ task.end_time.astimezone(task.end_time.tzinfo).strftime('%I:%M %p') }}</p>
+                    {% endif %}
+                    {% if task.location_id %}
+                        <p><strong>Location:</strong> 
+                        {% if task.location %}
+                            {{ task.location.name }}
+                        {% endif %}
+                        </p>
+                    {% endif %}
+                    <p><strong>Source:</strong> {{ task.source }}</p>
+                </div>
+            {% else %}
+                <div class="task-card">
+                    <h3>No tasks scheduled for today</h3>
                 </div>
             {% endfor %}
         </div>
@@ -29,64 +89,112 @@
 
     <div id="map"></div>
     <script>
-    const orderedLocations = [
-      { lat: 37.4221, lng: -122.0841 }, // Home
-      { lat: 37.4268, lng: -122.0806 }, // Task 1
-      { lat: 37.7749, lng: -122.4194 }, // Task 2
-      { lat: 37.3382, lng: -121.8863 }  // Task 3
-    ];
+    // Parse locations data passed from Python
+    const orderedLocations = {{ locations|tojson|safe }};
 
     let map;
 
     function initMap() {
+      // If no locations, center on a default location
+      if (orderedLocations.length === 0) {
+        map = new google.maps.Map(document.getElementById("map"), {
+          zoom: 10,
+          center: {lat: 37.4221, lng: -122.0841}, // Default center
+        });
+        return;
+      }
+      
       map = new google.maps.Map(document.getElementById("map"), {
         zoom: 10,
-        center: orderedLocations[0],
+        center: orderedLocations[0], // Center on first location (home)
       });
 
+      // If only one location, just show a marker
+      if (orderedLocations.length === 1) {
+        new google.maps.Marker({
+          position: orderedLocations[0],
+          map: map,
+          title: orderedLocations[0].name
+        });
+        return;
+      }
+
+      // For multiple locations, calculate a route
       const directionsService = new google.maps.DirectionsService();
       const directionsRenderer = new google.maps.DirectionsRenderer({
         map: map,
         suppressMarkers: false
       });
 
-      const origin = orderedLocations[0];
-      const destination = orderedLocations[orderedLocations.length - 1];
+      const origin = orderedLocations[0]; // First location (home)
+      const destination = orderedLocations[orderedLocations.length - 1]; // Last location
+      
+      // Any locations in between are waypoints
       const waypoints = orderedLocations.slice(1, -1).map(loc => ({
-        location: loc,
+        location: new google.maps.LatLng(loc.lat, loc.lng),
         stopover: true,
       }));
 
       directionsService.route(
         {
-          origin: origin,
-          destination: destination,
+          origin: new google.maps.LatLng(origin.lat, origin.lng),
+          destination: new google.maps.LatLng(destination.lat, destination.lng),
           waypoints: waypoints,
-          optimizeWaypoints: false, // Already optimized via Python
+          optimizeWaypoints: false, // We've already optimized via Python
           travelMode: google.maps.TravelMode.DRIVING,
         },
         (response, status) => {
           if (status === "OK") {
             directionsRenderer.setDirections(response);
+            
+            // Add markers with labels for each stop
+            const bounds = new google.maps.LatLngBounds();
+            
+            orderedLocations.forEach((location, i) => {
+              const position = new google.maps.LatLng(location.lat, location.lng);
+              bounds.extend(position);
+              
+              // Create a marker for each location
+              const marker = new google.maps.Marker({
+                position: position,
+                map: map,
+                label: (i === 0) ? 'H' : i.toString(), // H for home, numbers for tasks
+                title: location.name,
+                visible: false // Hide default markers as directions will show them
+              });
+            });
+            
+            map.fitBounds(bounds);
           } else {
             console.error("Directions request failed due to " + status);
+            
+            // Fallback to showing individual markers if route fails
+            orderedLocations.forEach((location, i) => {
+              new google.maps.Marker({
+                position: {lat: location.lat, lng: location.lng},
+                map: map,
+                label: (i === 0) ? 'H' : i.toString(), // H for home, numbers for tasks
+                title: location.name
+              });
+            });
           }
         }
       );
     }
 
     window.initMap = initMap;
-  </script>
+    </script>
 
-  <!-- Call initMap after loading -->
-  <script async defer
-    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC_Dz0XtugoW2odkRb-QGaMT96bA0y9YJs&callback=initMap">
-  </script>
+    <!-- Call initMap after loading -->
+    <script async defer
+      src="https://maps.googleapis.com/maps/api/js?key=AIzaSyC_Dz0XtugoW2odkRb-QGaMT96bA0y9YJs&callback=initMap">
+    </script>
+    
     <script>
         function editTask(taskId) {
             alert('Edit task ' + taskId);
             // Redirect or open a modal as needed:
-            // window.location.href = ⁠ /edit-task/${taskId} ⁠;
+            // window.location.href = `/edit-task/${taskId}`;
         }
     </script>
 </body>
