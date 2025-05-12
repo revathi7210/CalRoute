@@ -125,65 +125,11 @@ def solve_tsp(distance_matrix, task_durations, time_windows):
         route.append(manager.IndexToNode(index))
         index = solution.Value(routing.NextVar(index))
     route.append(manager.IndexToNode(index))
-    return route
-
-
-
-# def solve_tsp(distance_matrix, task_durations, time_windows,
-#               start_index=0, end_index=0, horizon=1440, time_limit_s=5):
-#     n = len(distance_matrix)
-#     print(f"\n🔧 Setting up TSP with {n} nodes, depot={start_index}→{end_index}")
-#     for i in range(n):
-#         print(f"  Node {i}: service={task_durations[i]}min TW={time_windows[i]}")
-#     manager = pywrapcp.RoutingIndexManager(n, 1, [start_index], [end_index])
-#     routing = pywrapcp.RoutingModel(manager)
-
-#     # transit = service at from + travel from→to
-#     def travel_service(from_idx, to_idx):
-#         i = manager.IndexToNode(from_idx)
-#         j = manager.IndexToNode(to_idx)
-#         return task_durations[i] + distance_matrix[i][j]
-
-#     transit_cb = routing.RegisterTransitCallback(travel_service)
-#     routing.SetArcCostEvaluatorOfAllVehicles(transit_cb)
-
-#     routing.AddDimension(
-#         transit_cb,
-#         120,        # no slack
-#         horizon,  # max total time
-#         True,     # force start cumul = 0
-#         "Time"
-#     )
-#     time_dim = routing.GetDimensionOrDie("Time")
-
-#     # apply windows
-#     for node in range(n):
-#         idx = manager.NodeToIndex(node)
-#         start, end = time_windows[node]
-#         time_dim.CumulVar(idx).SetRange(start, end)
-
-#     search_params = pywrapcp.DefaultRoutingSearchParameters()
-#     search_params.first_solution_strategy = (
-#         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-#     )
-#     search_params.local_search_metaheuristic = (
-#         routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-#     )
-#     search_params.time_limit.seconds = time_limit_s
-
-#     print("🧠 Solving TSP …")
-#     solution = routing.SolveWithParameters(search_params)
-#     if solution is None:
-#         print("❌ Solver failed.")
-#         return None, manager, routing, None
-
-#     # extract route
-#     route = []
-#     index = routing.Start(0)
-#     while not routing.IsEnd(index):
-#         route.append(manager.IndexToNode(index))
-#         index = solution.Value(routing.NextVar(index))
-#     route.append(manager.IndexToNode(index))
-
-#     print("✅ Route found:", route)
-#     return route, manager, routing, solution
+    
+    # now pull out the solver’s departure time at each node
+    start_times = [0] * n
+    for i in range(n):
+        var = time_dim.CumulVar(manager.NodeToIndex(i))
+        start_times[i] = solution.Value(var)
+ 
+    return route, start_times

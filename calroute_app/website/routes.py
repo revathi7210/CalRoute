@@ -422,79 +422,79 @@ def geocode_address(addr):
 
 # Protected schedule route
 
-@main.route("/schedule")
-def schedule():
-    user_id = session.get("user_id")
-    if not user_id:
-        return redirect(url_for("main.landing"))
+# @main.route("/schedule")
+# def schedule():
+#     user_id = session.get("user_id")
+#     if not user_id:
+#         return redirect(url_for("main.landing"))
 
-    user = User.query.get(user_id)
-    if not user or not user.google_access_token or not user.todoist_token:
-        return redirect(url_for("main.landing"))
+#     user = User.query.get(user_id)
+#     if not user or not user.google_access_token or not user.todoist_token:
+#         return redirect(url_for("main.landing"))
 
-    # 1) Pull in calendar + todoist tasks
-    fetch_google_calendar_events(user)
-    parse_and_store_tasks(user)
+#     # 1) Pull in calendar + todoist tasks
+#     fetch_google_calendar_events(user)
+#     parse_and_store_tasks(user)
 
-    # results = (
-    #     db.session.query(RawTask, Location.name.label("loc_name"))
-    #               .join(Location, RawTask.location_id == Location.location_id)
-    #               .filter(RawTask.user_id == user.user_id)
-    #               .order_by(RawTask.start_time)
-    #               .all()
-    # )
+#     # results = (
+#     #     db.session.query(RawTask, Location.name.label("loc_name"))
+#     #               .join(Location, RawTask.location_id == Location.location_id)
+#     #               .filter(RawTask.user_id == user.user_id)
+#     #               .order_by(RawTask.start_time)
+#     #               .all()
+#     # )
 
-    # print(results)
-    # # 3) Separate into raw_tasks list & geocode locations
-    # raw_tasks = []
-    # task_locations = []
-    # for raw_task, loc_name in results:
-    #     raw_tasks.append(raw_task)
+#     # print(results)
+#     # # 3) Separate into raw_tasks list & geocode locations
+#     # raw_tasks = []
+#     # task_locations = []
+#     # for raw_task, loc_name in results:
+#     #     raw_tasks.append(raw_task)
 
-    #     if not loc_name:
-    #         continue
+#     #     if not loc_name:
+#     #         continue
 
-    #     lat, lng = geocode_address(loc_name)
-    #     if lat is None or lng is None:
-    #         continue
+#     #     lat, lng = geocode_address(loc_name)
+#     #     if lat is None or lng is None:
+#     #         continue
 
-    #     task_locations.append({
-    #         "lat":   lat,
-    #         "lng":   lng,
-    #         "title": raw_task.title
-    #     })
-    # print(raw_tasks)
-    # print(task_locations)
+#     #     task_locations.append({
+#     #         "lat":   lat,
+#     #         "lng":   lng,
+#     #         "title": raw_task.title
+#     #     })
+#     # print(raw_tasks)
+#     # print(task_locations)
 
-    try:
-        run_optimization(user)
-    except Exception as e:
-        print("inside /scheudule")
-        print("❌ Optimization error:", e)
+#     try:
+#         run_optimization(user)
+#     except Exception as e:
+#         print("inside /scheudule")
+#         print("❌ Optimization error:", e)
 
-    results = (
-        db.session.query(ScheduledTask, Location)
-        .join(Location, ScheduledTask.location_id == Location.location_id)
-        .filter(ScheduledTask.user_id == user.user_id)
-        .order_by(ScheduledTask.scheduled_start_time)
-        .all()
-    )
+#     results = (
+#         db.session.query(ScheduledTask, Location)
+#         .join(Location, ScheduledTask.location_id == Location.location_id)
+#         .filter(ScheduledTask.user_id == user.user_id)
+#         .order_by(ScheduledTask.scheduled_start_time)
+#         .all()
+#     )
 
-    task_locations = [
-        {
-            "lat": location.latitude,
-            "lng": location.longitude,
-            "title": sched_task.title
-        }
-        for sched_task, location in results if location.latitude and location.longitude
-    ]
+#     task_locations = [
+#         {
+#             "lat": location.latitude,
+#             "lng": location.longitude,
+#             "title": sched_task.title
+#         }
+#         for sched_task, location in results if location.latitude and location.longitude
+#     ]
 
-    return render_template(
-        "schedule.html",
-        user=user,
-        raw_tasks=[],  # or ScheduledTask.query.filter_by(user_id=user.user_id).all() if needed
-        task_locations=task_locations
-    )
+#     return render_template(
+#         "schedule.html",
+#         user=user,
+#         raw_tasks=[],  # or ScheduledTask.query.filter_by(user_id=user.user_id).all() if needed
+#         task_locations=task_locations
+#     )
 
 @main.route("/api/tasks", methods=["GET"])
 def get_scheduled_tasks():
