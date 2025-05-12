@@ -1,7 +1,7 @@
 # File: optimize_routes.py
 
 from flask import Blueprint, session, request, jsonify
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from .extensions import db
 from .models import RawTask, ScheduledTask, Location, User
 from .maps_utils import build_distance_matrix, solve_tsp
@@ -178,7 +178,7 @@ def run_optimization(user, current_lat=None, current_lng=None):
         return False
 
     home_address = "Verano Place, Irvine, CA"
-    home_already_present = any("verano place" in loc.address.lower() for _, loc in tasks_with_locations)
+    #home_already_present = any("verano place" in loc.address.lower() for _, loc in tasks_with_locations)
     now = datetime.now()
 
     locations = []
@@ -192,6 +192,10 @@ def run_optimization(user, current_lat=None, current_lng=None):
         locations.append(current_loc)
         durations.append(0)
         time_windows.append((now.hour * 60 + now.minute, 1440))
+    else:
+        locations.append(home_address)
+        durations.append(0)
+        time_windows.append((0, 1440))
 
     # 2) then each task
     for task, loc in tasks_with_locations:
@@ -210,10 +214,10 @@ def run_optimization(user, current_lat=None, current_lng=None):
         end_min = (task.end_time.hour * 60 + task.end_time.minute) if task.end_time else 1440
         time_windows.append((start_min, end_min))
 
-    if not home_already_present:
-        locations.append(home_address)
-        durations.append(0)
-        time_windows.append((0, 1440))
+    
+    locations.append(home_address)
+    durations.append(0)
+    time_windows.append((0, 1440))
 
     distance_matrix = build_distance_matrix(locations)
     n = len(distance_matrix)
@@ -221,6 +225,12 @@ def run_optimization(user, current_lat=None, current_lng=None):
     print("\n📍 Locations:")
     for i, addr in enumerate(locations):
         print(f"{i}: {addr}")
+    
+    for i, dur in enumerate(durations):
+        print(f"{i}: {dur}")
+    
+    for i, time_window in enumerate(time_windows):
+        print(f"{i}: {time_window}")
 
     print("\n📏 Distance Matrix (minutes):")
     for i, row in enumerate(distance_matrix):
@@ -228,10 +238,10 @@ def run_optimization(user, current_lat=None, current_lng=None):
         print(f"{i}: {row_str}")
     print("\n")
 
-    start_index = 0
-    end_index = n - 1 if not home_already_present else 0
-    route = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows, start_index=start_index, end_index=end_index)
-
+    #start_index = 0
+    #end_index = n-1
+    #route = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows, start_index=start_index, end_index=end_index)
+    route = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows)
     ScheduledTask.query.filter_by(user_id=user.user_id).delete()
     db.session.commit()
 
@@ -264,3 +274,125 @@ def run_optimization(user, current_lat=None, current_lng=None):
     db.session.commit()
     print("✅ Schedule optimized.")
     return True
+
+# optimize_routes.py
+
+# def run_optimization(user, current_lat=None, current_lng=None):
+#     # 1) Fetch raw tasks + locations
+#     tasks = (
+#         db.session.query(RawTask, Location)
+#           .join(Location, RawTask.location_id == Location.location_id)
+#           .filter(RawTask.user_id == user.user_id,
+#                   Location.user_id == user.user_id)
+#           .order_by(RawTask.start_time)
+#           .all()
+#     )
+#     if not tasks:
+#         print("No tasks to schedule.")
+#         return False
+
+#     print("\n🔍 Raw tasks:")
+#     for i, (raw, loc) in enumerate(tasks):
+#         print(f"  {i}: '{raw.title}' @ {loc.address} "
+#               f"(prio={raw.priority}) "
+#               f"{raw.start_time}–{raw.end_time}")
+
+#     # 2) Build lists: depot → tasks → depot
+#     now = datetime.now()
+#     locs, durs, tws = [], [], []
+
+#     # 2a) Starting depot
+#     if current_lat and current_lng:
+#         depot_addr = reverse_geocode_osm(current_lat, current_lng)
+#         tw0 = (now.hour*60 + now.minute, 1440)
+#     else:
+#         depot_addr = "Verano Place, Irvine, CA"
+#         tw0 = (0, 1440)
+#     locs.append(depot_addr);  durs.append(0); tws.append(tw0)
+
+#     # 2b) Each task
+#     for raw, loc in tasks:
+#         locs.append(loc.address)
+#         if raw.start_time and raw.end_time:
+#             service = int((raw.end_time - raw.start_time).total_seconds()//60)
+#         else:
+#             service = 30
+#         durs.append(service)
+#         if raw.priority == 1 and raw.start_time and raw.end_time:
+#             start_min = raw.start_time.hour*60 + raw.start_time.minute
+#             end_min   = raw.end_time.hour*60   + raw.end_time.minute
+#         else:
+#             start_min, end_min = 0, 1440
+#         tws.append((start_min, end_min))
+
+#     # 2c) Ending depot
+#     locs.append(depot_addr); durs.append(0); tws.append((0,1440))
+
+#     # 3) Debug prints
+#     print("\n⏱ Service durations:")
+#     for i, dd in enumerate(durs):
+#         print(f"  {i}: {dd}min")
+#     print("\n⏰ Time windows:")
+#     for i, (s,e) in enumerate(tws):
+#         print(f"  {i}: [{s},{e}]")
+
+#     # 4) Build & solve
+#     matrix = build_distance_matrix(locs)
+#     route, mgr, routing, sol = solve_tsp(
+#         matrix,
+#         task_durations=durs,
+#         time_windows=tws,
+#         start_index=0,
+#         end_index=len(locs)-1
+#     )
+#     if route is None:
+#         print("❌ No feasible route found.")
+#         return False
+
+#     # 5) Print solver‐computed arrival times
+#     time_dim = routing.GetDimensionOrDie("Time")
+#     print("\n⏲️ Solver arrival times (minutes since midnight):")
+#     for node in route:
+#         idx = mgr.NodeToIndex(node)
+#         arr = sol.Value(time_dim.CumulVar(idx))
+#         print(f"  node {node}: arrives at {arr}min")
+
+#     # 6) Delete only uncompleted
+#     ScheduledTask.query.filter_by(user_id=user.user_id)\
+#                        .filter(ScheduledTask.status!="completed")\
+#                        .delete()
+#     db.session.commit()
+
+#     # 7) Write schedule back
+#     today = date.today()
+#     for node in route:
+#         if node==0 or node==len(locs)-1:
+#             continue
+#         raw, _ = tasks[node-1]
+#         svc   = durs[node]
+#         idx   = mgr.NodeToIndex(node)
+#         arr   = sol.Value(time_dim.CumulVar(idx))
+#         start_dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=arr)
+#         end_dt   = start_dt + timedelta(minutes=svc)
+
+#         # override for strict‐priority
+#         if raw.priority==1 and raw.start_time and raw.end_time:
+#             start_dt, end_dt = raw.start_time, raw.end_time
+
+#         print(f"  → scheduling '{raw.title}': {start_dt} → {end_dt}")
+#         db.session.add(ScheduledTask(
+#             user_id=user.user_id,
+#             raw_task_id=raw.raw_task_id,
+#             title=raw.title,
+#             description=raw.description,
+#             location_id=raw.location_id,
+#             scheduled_start_time=start_dt,
+#             scheduled_end_time=end_dt,
+#             status="pending",
+#             priority=raw.priority,
+#             travel_eta_minutes=0
+#         ))
+
+#     db.session.commit()
+#     print("✅ Schedule written to DB.")
+#     return True

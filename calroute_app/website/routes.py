@@ -274,6 +274,7 @@ def fetch_google_calendar_events(user):
             description=description,
             start_time=start_dt,
             end_time=end_dt,
+            priority = 1,
             raw_data=event,
             location_id=location_obj.location_id if location_obj else None
         )

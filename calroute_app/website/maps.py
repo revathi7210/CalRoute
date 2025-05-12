@@ -12,15 +12,15 @@ df = pd.DataFrame({
     'taskid': [0, 1, 2, 3],
     'taskname': ['Depot', 'Visit Prof', 'Conference', 'Meeting'],
     'location': [
-        "76000 Verano Road, Irvine, CA",
-        "San Jose State University, San Jose, CA",
-        "Stanford University, Stanford, CA",
-        "4541 Campus Dr, Irvine, CA 92612"
+        "Verano Place, Irvine, CA",
+        "Trader Joe's, 4225 Campus Dr, Irvine, CA 92612, USA",
+        "Paul Merage School of Business Building 2, Irvine, CA 92617, USA",
+        "Steinhaus Hall, Irvine, CA 92697, USA"
     ],
-    'duration': [0, 50, 55, 90],
-    'time_start': [0, 600, 500, 300],
-    'time_end': [1440, 1100, 1000, 800],
-    'mode': ['driving', 'driving', 'driving', 'walking']
+    'duration': [0, 60, 60, 170],
+    'time_start': [0, 840, 960, 1140],
+    'time_end': [1440, 900, 1020, 1310],
+    'mode': ['driving', 'driving', 'driving', 'driving']
 })
 
 
@@ -45,21 +45,73 @@ def build_distance_matrix(locations, mode="driving"):
 
 
 # ==== STEP 2A: TSP with Constraints ====
+# def solve_tsp_with_constraints(distance_matrix, task_durations, time_windows):
+#     n = len(distance_matrix)
+#     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+#     routing = pywrapcp.RoutingModel(manager)
+
+#     def time_callback(from_index, to_index):
+#         return distance_matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+
+#     transit_index = routing.RegisterTransitCallback(time_callback)
+#     routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
+
+#     routing.AddDimension(
+#         transit_index,
+#         120,
+#         1440,
+#         False,
+#         "Time"
+#     )
+#     time_dim = routing.GetDimensionOrDie("Time")
+
+#     for i in range(n):
+#         idx = manager.NodeToIndex(i)
+#         time_dim.SlackVar(idx).SetValue(task_durations[i])
+#         start, end = time_windows[i]
+#         time_dim.CumulVar(idx).SetRange(start, end)
+
+#     for i in range(1, n):
+#         routing.AddDisjunction([manager.NodeToIndex(i)], 1000)
+
+#     search_params = pywrapcp.DefaultRoutingSearchParameters()
+#     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
+#     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+#     search_params.time_limit.seconds = 3
+
+#     print("🧠 Solving TSP with time windows...")
+#     solution = routing.SolveWithParameters(search_params)
+#     if not solution:
+#         print("❌ Solver failed.")
+#         return None
+
+#     route = []
+#     index = routing.Start(0)
+#     while not routing.IsEnd(index):
+#         route.append(manager.IndexToNode(index))
+#         index = solution.Value(routing.NextVar(index))
+#     route.append(manager.IndexToNode(index))
+#     return route
+
 def solve_tsp_with_constraints(distance_matrix, task_durations, time_windows):
     n = len(distance_matrix)
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
     def time_callback(from_index, to_index):
-        return distance_matrix[manager.IndexToNode(from_index)][manager.IndexToNode(to_index)]
+        """Travel time + service time at the from node"""
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return distance_matrix[from_node][to_node] + task_durations[from_node]
 
     transit_index = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
 
+    # Add Time dimension (travel time only)
     routing.AddDimension(
         transit_index,
-        120,
-        1440,
+        120,  # Allow 2 hours waiting time if needed
+        1440,  # Max time per vehicle
         False,
         "Time"
     )
@@ -67,9 +119,9 @@ def solve_tsp_with_constraints(distance_matrix, task_durations, time_windows):
 
     for i in range(n):
         idx = manager.NodeToIndex(i)
-        time_dim.SlackVar(idx).SetValue(task_durations[i])
         start, end = time_windows[i]
         time_dim.CumulVar(idx).SetRange(start, end)
+        print(f"Node {i} → Duration: {task_durations[i]} min, TimeWindow: {start}-{end} min")
 
     for i in range(1, n):
         routing.AddDisjunction([manager.NodeToIndex(i)], 1000)
@@ -77,7 +129,7 @@ def solve_tsp_with_constraints(distance_matrix, task_durations, time_windows):
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_params.time_limit.seconds = 3
+    search_params.time_limit.seconds = 5
 
     print("🧠 Solving TSP with time windows...")
     solution = routing.SolveWithParameters(search_params)
