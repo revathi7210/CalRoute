@@ -1,7 +1,7 @@
 import os
 import requests
 import re
-from datetime import datetime, time, timezone
+from datetime import datetime, timedelta, time, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.exc import IntegrityError
@@ -26,7 +26,8 @@ llm_template = (
     "3. **Empty Response:** If no information matches the description, return an empty string ('').\n"
     "4. **Direct Data Only:** Your output should contain only the data that is explicitly requested, with no other text.\n"
 )
-model = OllamaLLM(model="llama3", base_url="http://host.docker.internal:11434")
+
+model = OllamaLLM(model="tinyllama",  base_url="http://52.36.81.221:11434")
 
 
 # Landing page
@@ -247,8 +248,8 @@ def parse_ollama(dom_chunks, parse_description):
 
     return "\n".join(parsed_results)
 
-
 def parse_and_store_tasks(user):
+    print("INSIDE PARSER")
     api = TodoistAPI(user.todoist_token)
     try:
         paginator = api.get_tasks()
@@ -262,10 +263,10 @@ def parse_and_store_tasks(user):
         return
 
     content_block = ""
-
+  
     for task_list in tasks:
         for task in task_list:
-            # print(task)
+            print(task)
             # print("\n")
             # if "Quick Add" in task.content or "Assign a task" in task.content:
             #     continue
