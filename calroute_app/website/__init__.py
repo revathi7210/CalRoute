@@ -11,13 +11,11 @@ def create_app():
     # app.config['SECRET_KEY'] = 'your_secret_key_here'  # needed for sessions, etc.
 
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ['SQLALCHEMY_DATABASE_URI']
-    
-    CORS(app, supports_credentials=True)
-
+    # Register Blueprints
     from .routes import main
     app.register_blueprint(main)
     app.register_blueprint(optimize_bp)
-    
+
     db.init_app(app)
     migrate.init_app(app, db)
 
@@ -26,5 +24,9 @@ def create_app():
     # (Optional) If you have an auth blueprint, it might look like this:
     # from .auth import auth
     # app.register_blueprint(auth, url_prefix='/auth')
+
+    CORS(app,
+         supports_credentials=True,
+         resources={r"/*": {"origins": "http://localhost:8080"}})
 
     return app

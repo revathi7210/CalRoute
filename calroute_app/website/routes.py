@@ -6,6 +6,9 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify
+
+from .models import User, db, RawTask, Location, UserPreference
+from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify
 from .models import User, db ,RawTask,Location, ScheduledTask
 
 from sqlalchemy.orm import joinedload
@@ -18,7 +21,7 @@ from .optimize_routes import run_optimization
 
 main = Blueprint('main', __name__)
 
-GOOGLE_MAPS_API = os.environ.get("GOOGLE_MAPS_API_ID") 
+GOOGLE_MAPS_API = os.environ.get("GOOGLE_MAPS_API_ID")
 TODOIST_API_KEY = os.environ.get("TODOIST_CLIENT_SECRET")  
 
 api = TodoistAPI(TODOIST_API_KEY)
@@ -32,7 +35,8 @@ llm_template = (
     "4. **Direct Data Only:** Your output should contain only the data that is explicitly requested, with no other text.\n"
 )
 
-model = OllamaLLM(model="llama3",  base_url="http://host.docker.internal:11434")
+model = OllamaLLM(model="tinyllama",  base_url="http://52.36.81.221:11434")
+
 
 # Landing page
 @main.route("/")
@@ -60,14 +64,16 @@ def callback_google():
     if not code:
         return "Authorization failed", 400
 
-    token_response = requests.post("https://oauth2.googleapis.com/token", data={
-        'code': code,
-        'client_id': os.getenv('GOOGLE_CLIENT_ID'),
-        'client_secret': os.getenv('GOOGLE_CLIENT_SECRET'),
-        'redirect_uri': 'http://localhost:8888/login/google/callback',
-        'grant_type': 'authorization_code'
-    })
-
+    token_response = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            'code': code,
+            'client_id': os.getenv('GOOGLE_CLIENT_ID'),
+            'client_secret': os.getenv('GOOGLE_CLIENT_SECRET'),
+            'redirect_uri': 'http://localhost:8888/login/google/callback',
+            'grant_type': 'authorization_code'
+        }
+    )
     if token_response.status_code != 200:
         return "Token exchange failed", 400
 
@@ -96,7 +102,15 @@ def callback_google():
     db.session.commit()
     session['user_id'] = user.user_id
 
-    return redirect("/login/todoist")
+    # Decide where to send after Google login:
+    frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    if user.todoist_token:
+        # Returning user → straight to React Homepage
+        return redirect(f"{frontend}/homepage")
+    else:
+        # First-timer → kick off Todoist OAuth
+        return redirect(url_for("main.login_todoist"))
+
 
 # Todoist login
 @main.route("/login/todoist")
@@ -115,13 +129,15 @@ def callback_todoist():
     if not code:
         return "Authorization failed", 400
 
-    response = requests.post("https://todoist.com/oauth/access_token", data={
-        "client_id": os.getenv("TODOIST_CLIENT_ID"),
-        "client_secret": os.getenv("TODOIST_CLIENT_SECRET"),
-        "code": code,
-        "redirect_uri": "http://localhost:8888/login/todoist/callback"
-    })
-
+    response = requests.post(
+        "https://todoist.com/oauth/access_token",
+        data={
+            "client_id": os.getenv("TODOIST_CLIENT_ID"),
+            "client_secret": os.getenv("TODOIST_CLIENT_SECRET"),
+            "code": code,
+            "redirect_uri": "http://localhost:8888/login/todoist/callback"
+        }
+    )
     if response.status_code != 200:
         return "Token exchange failed", 400
 
@@ -138,7 +154,9 @@ def callback_todoist():
     user.todoist_token = todoist_token
     db.session.commit()
 
-    return redirect("/schedule")
+    # After Todoist OAuth, send everyone to the React Homepage
+    frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    return redirect(f"{frontend}/homepage")
 
 def fetch_google_calendar_events(user):
     headers = {
@@ -192,6 +210,8 @@ def fetch_google_calendar_events(user):
         description = event.get("description", "")
         start = event.get("start", {}).get("dateTime")
         end = event.get("end", {}).get("dateTime")
+        # start = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+        # end = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
         location_text = event.get("location")
 
         if not start or not end:
@@ -231,14 +251,13 @@ def fetch_google_calendar_events(user):
                     continue  # skip adding this task altogether if geocode fails
 
                 location_obj = Location(
-                    # NEED TO ADD A LOCATION ID HERE, NO NEED FOR USER_ID 
+                    # NEED TO ADD A LOCATION ID HERE, NO NEED FOR USER_ID
                     user_id=user.user_id,
                     name=location_text,
                     latitude=lat,
                     longitude=lng,
                     address=location_text
                 )
-
                 db.session.add(location_obj)
                 try:
                     db.session.flush()  # Ensure location_obj.id is available
@@ -246,7 +265,6 @@ def fetch_google_calendar_events(user):
                     db.session.rollback()
                     print("Duplicate location or DB error occurred.")
                     continue
-
 
         task = RawTask(
             user_id=user.user_id,
@@ -486,7 +504,7 @@ def get_scheduled_tasks():
     user = User.query.get(user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
-    
+
     # Trigger schedule logic before returning tasks
     fetch_google_calendar_events(user)
     parse_and_store_tasks(user)
@@ -517,37 +535,73 @@ def get_scheduled_tasks():
 
     return jsonify({"tasks": tasks})
 
+
+# “Who am I?” endpoint for React
 @main.route("/me")
 def me():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({}), 401
+
+    u = User.query.get(user_id)
+    if not u:
+        return jsonify({}), 404
+
+    return jsonify({
+        "id":            u.user_id,
+        "name":          u.name,
+        "email":         u.email,
+        "todoist_token": u.todoist_token or ""
+    })
+
+# helper to parse “HH:MM” or “HH:MM:SS”
+def parse_time_str(ts: str):
+    if not ts:
+        return None
+    try:
+        # first try full isoformat
+        return time.fromisoformat(ts)
+    except ValueError:
+        try:
+            # fallback to H:M
+            return datetime.strptime(ts, "%H:%M").time()
+        except ValueError:
+            return None
+
+@main.route("/preferences", methods=["POST"])
+def save_preferences():
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
 
     user = User.query.get(user_id)
     if not user:
-        return jsonify({"error": "User not found"}), 401
+        return jsonify({"error": "User not found"}), 404
 
-    # Validate required tokens
-    if not user.google_access_token or not user.todoist_token:
-        return jsonify({"error": "Missing tokens"}), 401
-    
+    data = request.get_json() or {}
 
-    print(user)
+    pref = UserPreference.query.filter_by(user_id=user_id).first()
+    if not pref:
+        pref = UserPreference(user_id=user_id)
 
-    return jsonify({
-        "id": user.user_id,
-        "name": user.name,
-        "email": user.email,
-        "todoist_token": user.todoist_token,
-        "google_token": user.google_access_token,  
-    })
+    pref.max_daily_hours        = data.get("max_daily_hours", pref.max_daily_hours)
+    pref.travel_mode            = data.get("travel_mode", pref.travel_mode)
+    pref.prioritization_style   = data.get("prioritization_style", pref.prioritization_style)
 
-@main.route("/logout", methods=["POST"])
-def logout():
-    session.clear()
-    return jsonify({"success": True})
+    pref.work_start_time        = parse_time_str(data.get("work_start_time"))
+    pref.work_end_time          = parse_time_str(data.get("work_end_time"))
 
-@main.route("/reset")
-def reset():
-    session.clear()
-    return "Session cleared."
+    # home address + coords
+    pref.home_address           = data.get("home_address", pref.home_address)
+    pref.home_lat               = data.get("home_lat", pref.home_lat)
+    pref.home_lng               = data.get("home_lng", pref.home_lng)
+
+    # inline favourite-store address + coords
+    pref.favorite_store_address = data.get("favorite_store_address", pref.favorite_store_address)
+    pref.favorite_store_lat     = data.get("favorite_store_lat", pref.favorite_store_lat)
+    pref.favorite_store_lng     = data.get("favorite_store_lng", pref.favorite_store_lng)
+
+    db.session.add(pref)
+    db.session.commit()
+
+    return jsonify({"message": "Preferences saved"}), 200
