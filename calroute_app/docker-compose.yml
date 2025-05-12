@@ -5,12 +5,13 @@ services:
     build: .
     ports:
       - "8888:5000"
-    command: bash -c "flask db upgrade && flask run --host=0.0.0.0"
     volumes:
       - .:/app
     environment:
       - SQLALCHEMY_DATABASE_URI=mysql+pymysql://root:calroute@db/calroute_db
       - FLASK_DEBUG=1
+      - DB_HOST=db
+      - DB_PORT=3306  
     depends_on:
       - db
     env_file:
@@ -27,7 +28,7 @@ services:
     volumes:
       - ./init_db:/docker-entrypoint-initdb.d
     ports:
-      - "3306:3306"
+      - "3307:3306"
 
 volumes:
   db_data:
