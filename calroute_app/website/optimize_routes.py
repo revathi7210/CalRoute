@@ -249,11 +249,22 @@ def run_optimization(user, current_lat=None, current_lng=None):
     print(tasks_with_locations)
     current_time = datetime.combine(datetime.now().date(), time(8, 0))
     for idx in route:
-        if idx >= len(tasks_with_locations):
-            print(f"Skipping index {idx} (home location)")
+        # if idx >= len(tasks_with_locations):
+        #     print(f"Skipping index {idx} (home location)")
+        #     continue
+
+        # raw, _ = tasks_with_locations[idx]
+        # dur = timedelta(minutes=int(durations[idx]))
+
+        # skip both the start‐depot (0) and end‐depot (n-1)
+        if idx == 0 or idx == n-1:
             continue
 
-        raw, _ = tasks_with_locations[idx]
+        # map the OR-Tools node back to your tasks_with_locations
+        task_idx = idx - 1
+
+        raw, _ = tasks_with_locations[task_idx]
+
         dur = timedelta(minutes=int(durations[idx]))
 
         sched = ScheduledTask(
