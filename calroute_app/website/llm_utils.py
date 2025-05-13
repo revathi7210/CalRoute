@@ -13,9 +13,19 @@ def call_gemini_for_location(task_text):
 
     model = genai.GenerativeModel("gemini-1.5-flash-latest")
     response = model.generate_content(
-        f"The following is a personal task: \"{task_text}\".\n"
-        f"Predict the most likely place where this would happen (example: Starbucks, Gym, Pharmacy).\n"
-        f"Respond with only the place name. If unsure, respond 'none'."
+        f"""
+You are a helpful assistant for a personal productivity app. Your job is to assign a real-world location to user tasks.
+
+Task: "{task_text}"
+
+Rules:
+1. Do not reply with "unknown", "none", or "not specified".
+2. If the task clearly mentions a location, use that.
+3. If the task does not mention a location, suggest the most common or likely place where such a task would happen a real life location name or company name (example: "buy groceries" → "local supermarket").
+4. Return only the place name, not a sentence.
+
+What is the most appropriate location for this task?
+"""
     )
 
     suggested = response.text.strip().lower()

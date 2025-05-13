@@ -14,6 +14,8 @@ from .models import User, db, RawTask, Location, UserPreference
 from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify,  current_app
 from .models import User, db ,RawTask,Location, ScheduledTask
 
+import google.generativeai as genai
+
 from sqlalchemy.orm import joinedload
 
 from .models import User, db, RawTask, Location, UserPreference
@@ -282,16 +284,28 @@ def fetch_google_calendar_events(user):
 def split_content(content, chunk_size=500):
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
 
-def parse_ollama(dom_chunks, parse_description):
-    prompt = ChatPromptTemplate.from_template(
-        "You are tasked with extracting specific information from the following text content: {dom_content}. Please extract only: {parse_description}. No extra text. Return '' if nothing matches. Only output the requested data."
-    )
-    chain = prompt | model
-    results = [
-        chain.invoke({"dom_content": chunk, "parse_description": parse_description})
-        for chunk in dom_chunks
-    ]
+def parse_gemini(dom_chunks, parse_description):
+    # ✅ Set up Gemini client
+    genai.configure(api_key=os.environ['GOOGLE_GENAI_API_KEY'])
+    model = genai.GenerativeModel("gemini-1.5-flash-latest") 
+
+    results = []
+    for chunk in dom_chunks:
+        prompt = f"""
+You are tasked with extracting specific information from the following text content:
+
+{chunk}
+
+Please extract only:
+{parse_description}
+
+No extra text. Return '' if nothing matches. Only output the requested data.
+"""
+        response = model.generate_content(prompt)
+        results.append(response.text.strip())
+
     return "\n".join(results)
+
 
 def parse_and_store_tasks(user):
 
@@ -330,11 +344,11 @@ def parse_and_store_tasks(user):
         Output: task=Learn DSA, location=none, date=none, time=none"""
     )
 
-    parsed = parse_ollama(
+    parsed = parse_gemini(
         split_content(content_block),
         parse_description
     )
-
+    print(parsed)
     parsed_tasks = parsed.splitlines()
 
     for line in parsed_tasks:
@@ -445,81 +459,6 @@ def geocode_address(addr):
     return None, None
 
 
-# Protected schedule route
-
-# @main.route("/schedule")
-# def schedule():
-#     user_id = session.get("user_id")
-#     if not user_id:
-#         return redirect(url_for("main.landing"))
-
-#     user = User.query.get(user_id)
-#     if not user or not user.google_access_token or not user.todoist_token:
-#         return redirect(url_for("main.landing"))
-
-#     # 1) Pull in calendar + todoist tasks
-#     fetch_google_calendar_events(user)
-#     parse_and_store_tasks(user)
-
-#     # results = (
-#     #     db.session.query(RawTask, Location.name.label("loc_name"))
-#     #               .join(Location, RawTask.location_id == Location.location_id)
-#     #               .filter(RawTask.user_id == user.user_id)
-#     #               .order_by(RawTask.start_time)
-#     #               .all()
-#     # )
-
-#     # print(results)
-#     # # 3) Separate into raw_tasks list & geocode locations
-#     # raw_tasks = []
-#     # task_locations = []
-#     # for raw_task, loc_name in results:
-#     #     raw_tasks.append(raw_task)
-
-#     #     if not loc_name:
-#     #         continue
-
-#     #     lat, lng = geocode_address(loc_name)
-#     #     if lat is None or lng is None:
-#     #         continue
-
-#     #     task_locations.append({
-#     #         "lat":   lat,
-#     #         "lng":   lng,
-#     #         "title": raw_task.title
-#     #     })
-#     # print(raw_tasks)
-#     # print(task_locations)
-
-#     try:
-#         run_optimization(user)
-#     except Exception as e:
-#         print("inside /scheudule")
-#         print("❌ Optimization error:", e)
-
-#     results = (
-#         db.session.query(ScheduledTask, Location)
-#         .join(Location, ScheduledTask.location_id == Location.location_id)
-#         .filter(ScheduledTask.user_id == user.user_id)
-#         .order_by(ScheduledTask.scheduled_start_time)
-#         .all()
-#     )
-
-#     task_locations = [
-#         {
-#             "lat": location.latitude,
-#             "lng": location.longitude,
-#             "title": sched_task.title
-#         }
-#         for sched_task, location in results if location.latitude and location.longitude
-#     ]
-
-#     return render_template(
-#         "schedule.html",
-#         user=user,
-#         raw_tasks=[],  # or ScheduledTask.query.filter_by(user_id=user.user_id).all() if needed
-#         task_locations=task_locations
-#     )
 
 @main.route("/api/tasks", methods=["GET"])
 def get_scheduled_tasks():
@@ -535,18 +474,18 @@ def get_scheduled_tasks():
     existing_count = ScheduledTask.query.filter_by(user_id=user_id).count()
     if existing_count == 0:
         current_app.logger.debug(f"No scheduled tasks for user {user_id}. Generating schedule...")
-        # try:
-        #     print("inside try")
-        #     fetch_google_calendar_events(user)
-        #     parse_and_store_tasks(user)
-        #     # If you have an optimization step, run it here
-        #     run_optimization(user)
-        #     db.session.commit()
-        # except Exception as e:
-        #     db.session.rollback()
-        #     current_app.logger.error(f"Error scheduling tasks for user {user_id}: {e}")
+        try:
+            print("inside try")
+            fetch_google_calendar_events(user)
+            parse_and_store_tasks(user)
+            # If you have an optimization step, run it here
+            run_optimization(user)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.error(f"Error scheduling tasks for user {user_id}: {e}")
 
-    fetch_google_calendar_events(user)
+    #fetch_google_calendar_events(user)
     #parse_and_store_tasks(user)
     run_optimization(user)
     db.session.commit()
