@@ -108,18 +108,42 @@ def run_optimization(user, current_lat=None, current_lng=None):
     for task, loc in tasks_with_locations:
         locations.append(loc.address)
 
-        # duration in minutes (or a default)
+        # 1) Determine service duration
         if task.start_time and task.end_time:
-            delta = task.end_time - task.start_time
-            dur = int(delta.total_seconds() // 60)
+            dur = int((task.end_time - task.start_time).total_seconds() // 60)
         else:
+            # No fixed start: default to 30 minutes
             dur = 30
         durations.append(dur)
 
-        # time window
-        start_min = (task.start_time.hour * 60 + task.start_time.minute) if task.start_time else 0
-        end_min = (task.end_time.hour * 60 + task.end_time.minute) if task.end_time else 1440
+        # 2) Build time window
+        if task.start_time:
+            start_min = task.start_time.hour * 60 + task.start_time.minute
+        else:
+            start_min = 0
+
+        if task.end_time:
+            end_min = task.end_time.hour * 60 + task.end_time.minute
+        else:
+            end_min = 24 * 60  # whole day
+
         time_windows.append((start_min, end_min))
+
+    # for task, loc in tasks_with_locations:
+    #     locations.append(loc.address)
+
+    #     # duration in minutes (or a default)
+    #     if task.start_time and task.end_time:
+    #         delta = task.end_time - task.start_time
+    #         dur = int(delta.total_seconds() // 60)
+    #     else:
+    #         dur = 30
+    #     durations.append(dur)
+
+    #     # time window
+    #     start_min = (task.start_time.hour * 60 + task.start_time.minute) if task.start_time else 0
+    #     end_min = (task.end_time.hour * 60 + task.end_time.minute) if task.end_time else 1440
+    #     time_windows.append((start_min, end_min))
 
     
     locations.append(home_address)
