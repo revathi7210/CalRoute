@@ -535,16 +535,20 @@ def get_scheduled_tasks():
     existing_count = ScheduledTask.query.filter_by(user_id=user_id).count()
     if existing_count == 0:
         current_app.logger.debug(f"No scheduled tasks for user {user_id}. Generating schedule...")
-        try:
-            print("inside try")
-            fetch_google_calendar_events(user)
-            parse_and_store_tasks(user)
-            # If you have an optimization step, run it here
-            run_optimization(user)
-            db.session.commit()
-        except Exception as e:
-            db.session.rollback()
-            current_app.logger.error(f"Error scheduling tasks for user {user_id}: {e}")
+        # try:
+        #     print("inside try")
+        #     fetch_google_calendar_events(user)
+        #     parse_and_store_tasks(user)
+        #     # If you have an optimization step, run it here
+        #     run_optimization(user)
+        #     db.session.commit()
+        # except Exception as e:
+        #     db.session.rollback()
+        #     current_app.logger.error(f"Error scheduling tasks for user {user_id}: {e}")
+
+    fetch_google_calendar_events(user)
+    run_optimization(user)
+    db.session.commit()
 
     # 2) Now fetch the scheduled tasks
     results = (
