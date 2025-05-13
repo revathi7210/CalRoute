@@ -20,5 +20,7 @@ COPY . /app/
 # ✅ Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh
 
+ENTRYPOINT ["./entrypoint.sh"]
+
 # ✅ Set default command
-CMD ["python", "app.py"]
+#CMD ["python", "app.py"]

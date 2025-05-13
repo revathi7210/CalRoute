@@ -35,7 +35,8 @@ TODOIST_API_KEY = os.environ.get("TODOIST_CLIENT_SECRET")
 
 main = Blueprint("main", __name__)
 
-model = OllamaLLM(model="llama3", base_url="http://host.docker.internal:11434")
+model = OllamaLLM(model="llama3.2", base_url="http://host.docker.internal:11434")
+# model = OllamaLLM(model="tinyllama",  base_url="http://52.36.81.221:11434")
 
 llm_template = (
     "You are tasked with extracting specific information from the following text content: {dom_content}. "
@@ -525,6 +526,7 @@ def get_scheduled_tasks():
     if existing_count == 0:
         current_app.logger.debug(f"No scheduled tasks for user {user_id}. Generating schedule...")
         try:
+            print("inside try")
             fetch_google_calendar_events(user)
             parse_and_store_tasks(user)
             # If you have an optimization step, run it here

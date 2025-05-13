@@ -60,8 +60,15 @@ class UserPreference(db.Model):
     work_end_time = db.Column(db.Time, nullable=True)
 
     travel_mode = db.Column(
-        db.Enum('driving', 'walking', 'transit', name='travel_mode'),
-        default='driving'
+        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare',
+                name='travel_mode'),
+        default='car', nullable=False
+    )
+
+    prioritization_style = db.Column(
+        db.Enum('important_first', 'quick_wins', 'balanced',
+                name='prioritization_style'),
+        default='balanced', nullable=False
     )
 
     # NEW fields to link to Location table
@@ -74,20 +81,6 @@ class UserPreference(db.Model):
         db.Integer,
         db.ForeignKey('locations.location_id', ondelete='SET NULL'),
         nullable=True
-    )
-
-    # Relationships to Location model
-    home_location = db.relationship(
-        'Location',
-        foreign_keys=[home_location_id],
-        backref='user_preference_home',
-        lazy=True
-    )
-    favorite_store_location = db.relationship(
-        'Location',
-        foreign_keys=[favorite_store_location_id],
-        backref='user_preference_store',
-        lazy=True
     )
 
 # ---------- User Habits ----------
