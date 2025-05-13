@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from flask import Blueprint, render_template, redirect, request, session, url_for,current_app
 
+import google.generativeai as genai
 from sqlalchemy.exc import IntegrityError
 
 from .models import User, db, RawTask, Location, UserPreference
@@ -239,15 +240,29 @@ def fetch_google_calendar_events(user):
 def split_content(content, chunk_size=500):
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
 
+
+
+
 def parse_ollama(dom_chunks, parse_description):
-    prompt = ChatPromptTemplate.from_template(
-        "You are tasked with extracting specific information from the following text content: {dom_content}. Please extract only: {parse_description}. No extra text. Return '' if nothing matches. Only output the requested data."
-    )
-    chain = prompt | model
-    results = [
-        chain.invoke({"dom_content": chunk, "parse_description": parse_description})
-        for chunk in dom_chunks
-    ]
+    # ✅ Set up Gemini client
+    genai.configure(api_key=os.environ['GOOGLE_GENAI_API_KEY'])
+    model = genai.GenerativeModel("gemini-1.5-flash-latest") 
+
+    results = []
+    for chunk in dom_chunks:
+        prompt = f"""
+You are tasked with extracting specific information from the following text content:
+
+{chunk}
+
+Please extract only:
+{parse_description}
+
+No extra text. Return '' if nothing matches. Only output the requested data.
+"""
+        response = model.generate_content(prompt)
+        results.append(response.text.strip())
+
     return "\n".join(results)
 
 def parse_and_store_tasks(user):
@@ -294,6 +309,7 @@ def parse_and_store_tasks(user):
 
     parsed_tasks = parsed.splitlines()
 
+    print(parsed)
     for line in parsed_tasks:
         match = re.match(
             r"task=(.*?),\s*location=(.*?),\s*date=(.*?),\s*time=(.*)",
@@ -383,54 +399,15 @@ def parse_and_store_tasks(user):
 @main.route("/schedule", methods=["GET"])
 
 def schedule():
-    user = User.query.get(session.get("user_id"))
-    # ✅ Load raw tasks
-    tasks = RawTask.query.filter_by(user_id=user.user_id).filter(
-        RawTask.start_time >= datetime.now()
-    ).order_by(RawTask.start_time).all()
+    user_id = session.get("user_id")
+    if not user_id:
+        return redirect(url_for("main.landing"))
 
-    # ✅ Attach resolved Location object to each task
-    for task in tasks:
-        if task.location_id:
-            task.location = Location.query.get(task.location_id)
-        else:
-            task.location = None
+    user = User.query.get(user_id)
+    if not user or not user.google_access_token or not user.todoist_token:
+        return redirect(url_for("main.landing"))
 
-    # ✅ 🟢 ADD THIS SAFE PATCH → extract lat/lng into task
-    for task in tasks:
-        if task.location:
-            task.lat = task.location.latitude
-            task.lng = task.location.longitude
-        else:
-            task.lat = None
-            task.lng = None
-
-    # ✅ Get home address string (or None)
-    home_address = None
-    user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
-    if user_pref and user_pref.home_location_id:
-        home_location = Location.query.get(user_pref.home_location_id)
-        if home_location:
-            home_address = home_location.address
-
-    # ✅ 🧠 Call optimizer (your function)
-    locations = []
-    try:
-        route, task_df = optimize_route_for_tasks(tasks, home_address)
-        locations = [{"lat": r["lat"], "lng": r["lng"]} for r in route if r["lat"] and r["lng"]]
-
-    except Exception as e:
-        print(f"Route optimization failed: {e}")
-        route = []
-        task_df = pd.DataFrame()
-
-    # ✅ Show result page
-    return render_template(
-        "schedule.html",
-        route=route,
-        task_df=task_df.to_html(classes="table table-striped", index=False),
-        user=user,
-        locations=locations   # 🟢 this line missing in your code
-)
-
-
+    # Import latest Google Calendar events
+    fetch_google_calendar_events(user)
+    parse_and_store_tasks(user)
+    return render_template("landingpage.html")
