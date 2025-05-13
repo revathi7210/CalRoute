@@ -137,8 +137,18 @@ def callback_todoist():
     db.session.commit()
 
     # After Todoist OAuth, send everyone to the React Homepage
+    # frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    # return redirect(f"{frontend}/homepage")
+
+    # After Todoist OAuth, send new users to /preferences, returning users to /homepage
     frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    return redirect(f"{frontend}/homepage")
+    pref = UserPreference.query.filter_by(user_id=user.user_id).first()
+    if pref:
+        # already have prefs → straight to the main app
+        return redirect(f"{frontend}/homepage")
+    else:
+        # first time → set up preferences
+        return redirect(f"{frontend}/preferences")
 
 def fetch_google_calendar_events(user):
     headers = {
@@ -615,17 +625,66 @@ def save_preferences():
     pref.work_end_time          = parse_time_str(data.get("work_end_time"))
 
     # home address + coords
-    pref.home_address           = data.get("home_address", pref.home_address)
-    pref.home_lat               = data.get("home_lat", pref.home_lat)
-    pref.home_lng               = data.get("home_lng", pref.home_lng)
+    # pref.home_address           = data.get("home_address", pref.home_address)
+    # pref.home_lat               = data.get("home_lat", pref.home_lat)
+    # pref.home_lng               = data.get("home_lng", pref.home_lng)
 
-    # inline favourite-store address + coords
-    pref.favorite_store_address = data.get("favorite_store_address", pref.favorite_store_address)
-    pref.favorite_store_lat     = data.get("favorite_store_lat", pref.favorite_store_lat)
-    pref.favorite_store_lng     = data.get("favorite_store_lng", pref.favorite_store_lng)
+    # # inline favourite-store address + coords
+    # pref.favorite_store_address = data.get("favorite_store_address", pref.favorite_store_address)
+    # pref.favorite_store_lat     = data.get("favorite_store_lat", pref.favorite_store_lat)
+    # pref.favorite_store_lng     = data.get("favorite_store_lng", pref.favorite_store_lng)
+
+    # home address → insert (or lookup) Location + link by ID
+    home_addr = data.get("home_address", None)
+    if home_addr:
+        # geocode the address server-side
+        lat, lng = geocode_address(home_addr)
+        if lat is not None and lng is not None:
+            loc = Location.query.filter_by(
+                user_id=user_id, address=home_addr
+            ).first()
+            if not loc:
+                loc = Location(
+                    user_id=user_id,
+                    name=home_addr,
+                    address=home_addr,
+                    latitude=lat,
+                    longitude=lng
+                )
+                db.session.add(loc)
+                db.session.flush()  # so loc.location_id is populated
+            pref.home_location_id = loc.location_id
+
+    # inline favorite-store address → same pattern
+    fav_addr = data.get("favorite_store_address", None)
+    if fav_addr:
+        lat, lng = geocode_address(fav_addr)
+        if lat is not None and lng is not None:
+            loc = Location.query.filter_by(
+                user_id=user_id, address=fav_addr
+            ).first()
+            if not loc:
+                loc = Location(
+                    user_id=user_id,
+                    name=fav_addr,
+                    address=fav_addr,
+                    latitude=lat,
+                    longitude=lng
+                )
+                db.session.add(loc)
+                db.session.flush()
+            pref.favorite_store_location_id = loc.location_id
 
     db.session.add(pref)
     db.session.commit()
 
-    return jsonify({"message": "Preferences saved"}), 200
+    #return jsonify({"message": "Preferences saved"}), 200
+    # once preferences are saved, bounce the user into the main app
+    frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    # you can either:
+    #  1) return a redirect
+    #return redirect(f"{frontend}/homepage")
+
+    # or, if you'd rather return JSON and have your React client navigate:
+    return jsonify({"message":"Preferences saved","redirect":"/homepage"}), 200
 
