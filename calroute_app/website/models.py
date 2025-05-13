@@ -52,38 +52,43 @@ class RawTask(db.Model):
 
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
-    pref_id      = db.Column(db.Integer, primary_key=True)
-    user_id      = db.Column(
-                      db.Integer,
-                      db.ForeignKey('users.user_id', ondelete='CASCADE'),
-                      nullable=False
-                   )
-    max_daily_hours    = db.Column(db.Float, default=8.0)
-    # work hours
-    work_start_time    = db.Column(db.Time, nullable=True)
-    work_end_time      = db.Column(db.Time, nullable=True)
+    pref_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
 
-    # travel mode & prioritization
-    travel_mode        = db.Column(
-                            db.Enum('car','bike','bus_train','walking','rideshare',
-                                    name='travel_mode'),
-                            default='car', nullable=False
-                         )
-    prioritization_style = db.Column(
-                              db.Enum('important_first','quick_wins','balanced',
-                                      name='prioritization_style'),
-                              default='balanced', nullable=False
-                           )
+    max_daily_hours = db.Column(db.Float, default=8.0)
+    work_start_time = db.Column(db.Time, nullable=True)
+    work_end_time = db.Column(db.Time, nullable=True)
 
-    # home address + geo
-    home_address       = db.Column(db.String(256), nullable=True)
-    home_lat           = db.Column(db.Float,       nullable=True)
-    home_lng           = db.Column(db.Float,       nullable=True)
+    travel_mode = db.Column(
+        db.Enum('driving', 'walking', 'transit', name='travel_mode'),
+        default='driving'
+    )
 
-    favorite_store_address = db.Column(db.String(256), nullable=True)
-    favorite_store_lat     = db.Column(db.Float,       nullable=True)
-    favorite_store_lng     = db.Column(db.Float,       nullable=True)
+    # NEW fields to link to Location table
+    home_location_id = db.Column(
+        db.Integer,
+        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
+        nullable=True
+    )
+    favorite_store_location_id = db.Column(
+        db.Integer,
+        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
+        nullable=True
+    )
 
+    # Relationships to Location model
+    home_location = db.relationship(
+        'Location',
+        foreign_keys=[home_location_id],
+        backref='user_preference_home',
+        lazy=True
+    )
+    favorite_store_location = db.relationship(
+        'Location',
+        foreign_keys=[favorite_store_location_id],
+        backref='user_preference_store',
+        lazy=True
+    )
 
 # ---------- User Habits ----------
 

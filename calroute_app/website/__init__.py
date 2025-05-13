@@ -10,7 +10,10 @@ def create_app():
     app = Flask(__name__)
     # app.config['SECRET_KEY'] = 'your_secret_key_here'  # needed for sessions, etc.
 
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ['SQLALCHEMY_DATABASE_URI']
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:///calroute.db')
+    app.config['GOOGLE_MAPS_API_KEY'] = os.getenv('GOOGLE_MAPS_API_KEY')
+    app.config['GOOGLE_GENAI_API_KEY'] = os.getenv('GOOGLE_GENAI_API_KEY')
+
     # Register Blueprints
     from .routes import main
     app.register_blueprint(main)
