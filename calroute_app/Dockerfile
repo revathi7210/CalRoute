@@ -1,34 +1,24 @@
-# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
-# Set work directory in the container
 WORKDIR /app
 
-# Install mysql client for mysqladmin + general tools
-RUN apt-get update && apt-get install -y default-mysql-client && rm -rf /var/lib/apt/lists/*
+# Install MySQL client
+RUN apt-get update && \
+    apt-get install -y default-mysql-client && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install dependencies:
-# - Copy and install requirements (prepare a requirements.txt with Flask, Flask-SQLAlchemy, PyMySQL etc.)
+# Copy requirements and install dependencies
 COPY requirements.txt /app/
-RUN pip install --no-cache-dir --use-deprecated=legacy-resolver -r requirements.txt && \
-    pip install google-ai-generativelanguage && \
-    pip uninstall -y google-cloud-aiplatform google-cloud-generativelanguage google-ai-generativelanguage google-api-core google-cloud-core || true && \
-    pip install google-generativeai
 
-# Copy entire project into working directory
+# ✅ SAFEST install order for Python slim images
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ✅ Copy rest of the code
 COPY . /app/
 
-# Make entrypoint executable
+# ✅ Make entrypoint executable
 RUN chmod +x /app/entrypoint.sh
 
-ENTRYPOINT ["./entrypoint.sh"]
-
-# # Expose the port Flask runs on
-# EXPOSE 5000
-
-# # Command to run the app (adjust if needed)
-# CMD ["python", "app.py"]
+# ✅ Set default command
+CMD ["python", "app.py"]

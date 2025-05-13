@@ -11,7 +11,8 @@ done
 echo "✅ MySQL is up!"
 
 echo "📥 Running flask db upgrade..."
-flask db upgrade
+export FLASK_APP=app.py
+python -m flask db upgrade
 
 echo "🚀 Starting Flask app..."
 exec python app.py
