@@ -62,7 +62,7 @@ class UserPreference(db.Model):
     travel_mode = db.Column(
         db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare',
                 name='travel_mode'),
-        default='car', nullable=False
+        default='car', nullable=True
     )
 
     prioritization_style = db.Column(

@@ -547,6 +547,7 @@ def get_scheduled_tasks():
         #     current_app.logger.error(f"Error scheduling tasks for user {user_id}: {e}")
 
     fetch_google_calendar_events(user)
+    #parse_and_store_tasks(user)
     run_optimization(user)
     db.session.commit()
 
