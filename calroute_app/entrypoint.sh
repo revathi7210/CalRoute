@@ -1,6 +1,8 @@
 #!/bin/bash
+
 set -e
 
+cd /app
 echo "⏳ Waiting for MySQL to be ready..."
 
 # Wait for MySQL to accept connections
@@ -11,8 +13,9 @@ done
 echo "✅ MySQL is up!"
 
 echo "📥 Running flask db upgrade..."
-export FLASK_APP=app.py
+export FLASK_APP=app:create_app     # ✅ points to factory function
+export FLASK_ENV=development
 python -m flask db upgrade
 
 echo "🚀 Starting Flask app..."
-exec python app.py
+exec flask run --host=0.0.0.0 --port=5000
