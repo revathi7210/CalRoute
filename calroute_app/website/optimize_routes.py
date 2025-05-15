@@ -67,7 +67,8 @@ def reverse_geocode_osm(lat: float, lng: float) -> str | None:
 
 def run_optimization(user, current_lat=None, current_lng=None):
     from .maps_utils import build_distance_matrix
-    from .routes import fetch_google_calendar_events, parse_and_store_tasks
+    from .views.calendar import fetch_google_calendar_events
+    from .views.todoist import parse_and_store_tasks
 
     from ortools.constraint_solver import pywrapcp, routing_enums_pb2
     fetch_google_calendar_events(user)
