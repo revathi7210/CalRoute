@@ -1,23 +1,26 @@
-# Use an official Python runtime as a parent image
-FROM python:3.9-slim
+FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
-# Set work directory in the container
 WORKDIR /app
 
-# Install dependencies:
-# - Copy and install requirements (prepare a requirements.txt with Flask, Flask-SQLAlchemy, PyMySQL etc.)
+# Install MySQL client
+RUN apt-get update && \
+    apt-get install -y default-mysql-client && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install dependencies
 COPY requirements.txt /app/
+
+# ✅ SAFEST install order for Python slim images
+RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy entire project into working directory
+# ✅ Copy rest of the code
 COPY . /app/
 
-# Expose the port Flask runs on
-EXPOSE 5000
+# ✅ Make entrypoint executable
+RUN chmod +x /app/entrypoint.sh
 
-# Command to run the app (adjust if needed)
-CMD ["python", "app.py"]
+ENTRYPOINT ["./entrypoint.sh"]
+
+# ✅ Set default command
+ CMD ["python", "app.py"]
