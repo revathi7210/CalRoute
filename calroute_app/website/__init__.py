@@ -2,6 +2,7 @@ import os
 from flask import Flask
 from flask_cors import CORS
 from website.extensions import db, migrate
+from .optimize_routes import optimize_bp
 
 def create_app():
     app = Flask(__name__)
@@ -42,5 +43,6 @@ def create_app():
     app.register_blueprint(calendar_bp)
     app.register_blueprint(tasks_bp)
     app.register_blueprint(preferences_bp)
+    app.register_blueprint(optimize_bp)
 
     return app
