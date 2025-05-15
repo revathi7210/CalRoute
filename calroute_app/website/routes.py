@@ -10,7 +10,6 @@ from .models import User, db, RawTask, Location, UserPreference, ScheduledTask
 import google.generativeai as genai
 from todoist_api_python.api import TodoistAPI
 
-from .optimize_routes import run_optimization
 
 from website.google_maps_helper import find_nearest_location, geocode_address
 from .location_resolver import resolve_location_for_task
@@ -326,6 +325,13 @@ def parse_and_store_tasks(user):
         if not match:
             continue
         task_title, location_name, date, time_str = match.groups()
+        external_id = f"{task_title}-{date}-{time_str}"
+
+        # 🟢 Step 0: Check if task already exists by external_id
+        existing_task = RawTask.query.filter_by(external_id=external_id).first()
+        if existing_task:
+            print(f"Skipping duplicate task: {external_id}")
+            continue
 
         # 🟢 Step 1: Try to resolve location from CalRoute DB / UserPrefs
         location = None
@@ -429,6 +435,7 @@ def geocode_address(addr):
 
 @main.route("/api/tasks", methods=["GET"])
 def get_scheduled_tasks():
+    from .optimize_routes import run_optimization
     user_id = session.get("user_id")
     if not user_id:
         return redirect("/login/google")
@@ -443,8 +450,6 @@ def get_scheduled_tasks():
         current_app.logger.debug(f"No scheduled tasks for user {user_id}. Generating schedule...")
         try:
             print("inside try")
-            fetch_google_calendar_events(user)
-            parse_and_store_tasks(user)
             # If you have an optimization step, run it here
             run_optimization(user)
             db.session.commit()
@@ -454,8 +459,8 @@ def get_scheduled_tasks():
 
     #fetch_google_calendar_events(user)
     #parse_and_store_tasks(user)
-    run_optimization(user)
-    db.session.commit()
+    # run_optimization(user)
+    # db.session.commit()
 
     results = (
         db.session.query(ScheduledTask, Location)
@@ -534,16 +539,6 @@ def save_preferences():
     pref.work_start_time        = parse_time_str(data.get("work_start_time"))
     pref.work_end_time          = parse_time_str(data.get("work_end_time"))
 
-    # home address + coords
-    # pref.home_address           = data.get("home_address", pref.home_address)
-    # pref.home_lat               = data.get("home_lat", pref.home_lat)
-    # pref.home_lng               = data.get("home_lng", pref.home_lng)
-
-    # # inline favourite-store address + coords
-    # pref.favorite_store_address = data.get("favorite_store_address", pref.favorite_store_address)
-    # pref.favorite_store_lat     = data.get("favorite_store_lat", pref.favorite_store_lat)
-    # pref.favorite_store_lng     = data.get("favorite_store_lng", pref.favorite_store_lng)
-
     # home address → insert (or lookup) Location + link by ID
     home_addr = data.get("home_address", None)
     if home_addr:
@@ -587,8 +582,6 @@ def save_preferences():
 
     db.session.add(pref)
     db.session.commit()
-
-    frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
     return jsonify({"message":"Preferences saved","redirect":"/homepage"}), 200
 
