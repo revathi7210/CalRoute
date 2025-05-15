@@ -27,6 +27,6 @@ Rules:
 What is the most appropriate location for this task?
 """
     )
-
+    print(response)
     suggested = response.text.strip().lower()
     return None if suggested == 'none' else suggested
