@@ -1,35 +1,20 @@
 import os
 import requests
-import re
-import requests
-from datetime import datetime, timedelta, time, timezone
+from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
-import pandas as pd
-from flask import Blueprint, render_template, redirect, request, session, url_for,current_app
+from flask import Blueprint, render_template, redirect, request, session, url_for,current_app, jsonify
 
 from sqlalchemy.exc import IntegrityError
-from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify
 
-from .models import User, db, RawTask, Location, UserPreference
-from flask import Blueprint, render_template, redirect, request, session, url_for, jsonify,  current_app
-from .models import User, db ,RawTask,Location, ScheduledTask
-
+from .models import User, db, RawTask, Location, UserPreference, ScheduledTask
 import google.generativeai as genai
-
-from sqlalchemy.orm import joinedload
-
-from .models import User, db, RawTask, Location, UserPreference
 from todoist_api_python.api import TodoistAPI
-from langchain_ollama import OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
 
 from .optimize_routes import run_optimization
 
-main = Blueprint('main', __name__)
-from website.google_maps_helper import find_nearest_location
+from website.google_maps_helper import find_nearest_location, geocode_address
 from .location_resolver import resolve_location_for_task
 from .llm_utils import call_gemini_for_location
-from website.google_maps_helper import geocode_address
 
 GOOGLE_MAPS_API = os.environ.get("GOOGLE_MAPS_API_ID")
 TODOIST_API_KEY = os.environ.get("TODOIST_CLIENT_SECRET")  
@@ -37,17 +22,6 @@ TODOIST_API_KEY = os.environ.get("TODOIST_CLIENT_SECRET")
 
 main = Blueprint("main", __name__)
 
-model = OllamaLLM(model="llama3.2", base_url="http://host.docker.internal:11434")
-# model = OllamaLLM(model="tinyllama",  base_url="http://52.36.81.221:11434")
-
-llm_template = (
-    "You are tasked with extracting specific information from the following text content: {dom_content}. "
-    "Please follow these instructions carefully:\n\n"
-    "1. **Extract Information:** Only extract the information that directly matches the provided description: {parse_description}. \n"
-    "2. **No Extra Content:** Do not include any additional text, comments, or explanations in your response.\n"
-    "3. **Empty Response:** If no information matches the description, return an empty string ('').\n"
-    "4. **Direct Data Only:** Your output should contain only the data that is explicitly requested, with no other text.\n"
-)
 @main.route("/")
 def landing():
     return render_template("landingpage.html")
@@ -138,11 +112,6 @@ def callback_todoist():
     user.todoist_token = response.json().get("access_token")
     db.session.commit()
 
-    # After Todoist OAuth, send everyone to the React Homepage
-    # frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    # return redirect(f"{frontend}/homepage")
-
-    # After Todoist OAuth, send new users to /preferences, returning users to /homepage
     frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
     pref = UserPreference.query.filter_by(user_id=user.user_id).first()
     if pref:
@@ -204,8 +173,6 @@ def fetch_google_calendar_events(user):
         description = event.get("description", "")
         start = event.get("start", {}).get("dateTime")
         end = event.get("end", {}).get("dateTime")
-        # start = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
-        # end = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
         location_text = event.get("location")
 
         if not start or not end:
@@ -490,7 +457,6 @@ def get_scheduled_tasks():
     run_optimization(user)
     db.session.commit()
 
-    # 2) Now fetch the scheduled tasks
     results = (
         db.session.query(ScheduledTask, Location)
         .join(Location, ScheduledTask.location_id == Location.location_id)
@@ -622,13 +588,7 @@ def save_preferences():
     db.session.add(pref)
     db.session.commit()
 
-    #return jsonify({"message": "Preferences saved"}), 200
-    # once preferences are saved, bounce the user into the main app
     frontend = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    # you can either:
-    #  1) return a redirect
-    #return redirect(f"{frontend}/homepage")
 
-    # or, if you'd rather return JSON and have your React client navigate:
     return jsonify({"message":"Preferences saved","redirect":"/homepage"}), 200
 
