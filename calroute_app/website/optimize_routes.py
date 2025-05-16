@@ -71,17 +71,16 @@ def run_optimization(user, current_lat=None, current_lng=None):
     from .views.todoist import parse_and_store_tasks
 
     from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-    RawTask.query.filter_by(user_id=user.user_id).delete()
     fetch_google_calendar_events(user)
     parse_and_store_tasks(user)
     tasks_with_locations = (
-    db.session.query(RawTask, Location)
-    .join(Location, RawTask.location_id == Location.location_id)
-    .filter(
-        RawTask.user_id == user.user_id
-    )
-    .order_by(RawTask.start_time)
-    .all()
+        db.session.query(RawTask, Location)
+        .join(Location, RawTask.location_id == Location.location_id)
+        .filter(
+            RawTask.user_id == user.user_id
+        )
+        .order_by(RawTask.start_time)
+        .all()
     )
 
     if not tasks_with_locations:
@@ -194,7 +193,6 @@ def run_optimization(user, current_lat=None, current_lng=None):
 
     print("tasksloc")
     print(tasks_with_locations)
-    print(route)
     today = datetime.now().date()
     for idx in route:
         # skip start and end depots
@@ -209,15 +207,12 @@ def run_optimization(user, current_lat=None, current_lng=None):
         if raw.priority == 1 and raw.start_time and raw.end_time:
             st = raw.start_time
             et = raw.end_time
-            #print(f"For Task [{idx}]: starttime: {st} endtime: {et}")
-            print("HIIIIIIII")
         else:
             # solver time in minutes since midnight
             mins = start_times[idx]
             st = datetime.combine(today, time(mins // 60, mins % 60))
             et = st + timedelta(minutes=dur)
-            #print(f"For Task [{idx}]: starttime: {st} endtime: {et}")
-        print(f"For Task idx={idx} → {raw.title}: {st} to {et}")
+
         sched = ScheduledTask(
             user_id=user.user_id,
             raw_task_id=raw.raw_task_id,
