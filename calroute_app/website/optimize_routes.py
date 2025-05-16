@@ -71,6 +71,9 @@ def run_optimization(user, current_lat=None, current_lng=None):
     from .views.todoist import parse_and_store_tasks
 
     from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+    RawTask.query.filter_by(user_id=user.user_id).delete()
+    db.session.commit()
+
     fetch_google_calendar_events(user)
     parse_and_store_tasks(user)
     tasks_with_locations = (
