@@ -3,7 +3,7 @@
 from flask import Blueprint, session, request, jsonify
 from datetime import datetime, timedelta, time, date
 from .extensions import db
-from .models import RawTask, ScheduledTask, Location, User
+from .models import RawTask, ScheduledTask, Location, User, UserPreference
 from .maps_utils import build_distance_matrix, solve_tsp
 import requests
 
@@ -88,8 +88,17 @@ def run_optimization(user, current_lat=None, current_lng=None):
         print("No tasks with locations found.")
         return False
 
-    home_address = "Verano Place, Irvine, CA"
-    #home_already_present = any("verano place" in loc.address.lower() for _, loc in tasks_with_locations)
+    pref = UserPreference.query.filter_by(user_id=user.user_id).first()
+    if not pref or not pref.home_location_id:
+        print("No home_location_id set in user preferences.")
+        return False
+    home_loc = Location.query.get(pref.home_location_id)
+    if not home_loc:
+        print(f"Home location not found (id={pref.home_location_id}).")
+        return False
+
+    home_address = home_loc.address
+    print(home_address)
     now = datetime.now()
 
     locations = []
