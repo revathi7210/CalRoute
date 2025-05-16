@@ -20,8 +20,8 @@ def get_scheduled_tasks():
     #  If no scheduled tasks, run the full pipeline
     if ScheduledTask.query.filter_by(user_id=user_id).count() == 0:
         try:
-            fetch_google_calendar_events(user)
-            parse_and_store_tasks(user)
+            #fetch_google_calendar_events(user)
+            #parse_and_store_tasks(user)
             run_optimization(user)
             db.session.commit()
         except Exception as e:
@@ -37,6 +37,7 @@ def get_scheduled_tasks():
         .order_by(ScheduledTask.scheduled_start_time)
         .all()
     )
+    print(results)
 
     tasks = []
     for sched_task, location in results:
