@@ -17,6 +17,7 @@ def get_scheduled_tasks():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
+    #  If no scheduled tasks, run the full pipeline
     if ScheduledTask.query.filter_by(user_id=user_id).count() == 0:
         try:
             fetch_google_calendar_events(user)
@@ -26,7 +27,9 @@ def get_scheduled_tasks():
         except Exception as e:
             db.session.rollback()
             current_app.logger.error(f"Task scheduling failed: {e}")
+            return jsonify({"error": "Task scheduling failed"}), 500
 
+    #  Get scheduled tasks + join with location
     results = (
         db.session.query(ScheduledTask, Location)
         .join(Location, ScheduledTask.location_id == Location.location_id)
@@ -35,13 +38,17 @@ def get_scheduled_tasks():
         .all()
     )
 
-    tasks = [{
-        "id": sched_task.sched_task_id,
-        "title": sched_task.title,
-        "start_time": sched_task.scheduled_start_time.strftime("%-I:%M %p"),
-        "end_time": sched_task.scheduled_end_time.strftime("%-I:%M %p"),
-        "lat": location.latitude,
-        "lng": location.longitude
-    } for sched_task, location in results]
+    tasks = []
+    for sched_task, location in results:
+        if not location:
+            continue
+        tasks.append({
+            "id": sched_task.sched_task_id,
+            "title": sched_task.title,
+            "start_time": sched_task.scheduled_start_time.strftime("%-I:%M %p"),
+            "end_time": sched_task.scheduled_end_time.strftime("%-I:%M %p"),
+            "lat": location.latitude,
+            "lng": location.longitude,
+        })
 
     return jsonify({"tasks": tasks})

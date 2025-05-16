@@ -114,15 +114,14 @@ def parse_and_store_tasks(user):
 
                     if place_data:
                         existing = Location.query.filter_by(
-                            user_id=user.user_id,
-                            name=place_data["name"]
+                            latitude=place_data["lat"],
+                            longitude=place_data["lng"]
                         ).first()
+
                         if existing:
                             location = existing
                         else:
                             location = Location(
-                                user_id=user.user_id,
-                                name=place_data["name"],
                                 address=place_data["address"],
                                 latitude=place_data["lat"],
                                 longitude=place_data["lng"]
@@ -156,3 +155,20 @@ def parse_and_store_tasks(user):
             db.session.commit()
         except Exception:
             db.session.rollback()
+
+
+def get_today_tasks(todoist_token):
+    try:
+        tasks = tasks = get_today_tasks(todoist_token)
+        today = datetime.now().date()
+        today_tasks = []
+        for task in tasks:
+            if task.due and task.due.date:
+                # Handle both date-only and datetime string cases
+                task_date = datetime.fromisoformat(task.due.date).date()
+                if task_date == today:
+                    today_tasks.append(task)
+        return today_tasks
+    except Exception as e:
+        print(f"Error fetching Todoist tasks: {e}")
+        return []    

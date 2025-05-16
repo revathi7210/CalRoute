@@ -13,15 +13,18 @@ def fetch_google_calendar_events(user):
     headers = {"Authorization": f"Bearer {user.google_access_token}"}
     local_tz = ZoneInfo("America/Los_Angeles")
     today_local = datetime.now(local_tz).date()
-    now = datetime.utcnow().isoformat() + "Z"
-    end_of_day_local = datetime.combine(today_local, time(23,59,59), tzinfo=local_tz)
+    
+    start_of_day_local = datetime.combine(today_local, time.min, tzinfo=local_tz)
+    end_of_day_local = datetime.combine(today_local, time(23, 59, 59), tzinfo=local_tz)
+
+    time_min = start_of_day_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     time_max = end_of_day_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     response = requests.get(
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",
         headers=headers,
         params={
-            'timeMin': now,
+            'timeMin': time_min,
             'timeMax': time_max,
             'singleEvents': True,
             'orderBy': 'startTime'
@@ -36,29 +39,31 @@ def fetch_google_calendar_events(user):
         end = event.get("end", {}).get("dateTime")
         if not start or not end:
             continue
+
         start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
         end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
 
         if RawTask.query.filter_by(external_id=event["id"], source='google_calendar').first():
             continue
 
-        loc_name = event.get("location")
         location_obj = None
+        loc_name = event.get("location")
         if loc_name:
             lat, lng = geocode_address(loc_name)
             if lat is not None:
-                location_obj = Location(
-                    user_id=user.user_id,
-                    name=loc_name,
-                    latitude=lat,
-                    longitude=lng,
-                    address=loc_name
-                )
-                db.session.add(location_obj)
-                try:
-                    db.session.flush()
-                except IntegrityError:
-                    db.session.rollback()
+                location_obj = Location.query.filter_by(latitude=lat, longitude=lng).first()
+                if not location_obj:
+                    location_obj = Location(
+                        address=loc_name,
+                        latitude=lat,
+                        longitude=lng
+                    )
+                    db.session.add(location_obj)
+                    try:
+                        db.session.flush()
+                    except IntegrityError:
+                        db.session.rollback()
+                        continue
 
         raw_task = RawTask(
             user_id=user.user_id,

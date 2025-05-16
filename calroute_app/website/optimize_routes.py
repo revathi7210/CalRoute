@@ -74,14 +74,13 @@ def run_optimization(user, current_lat=None, current_lng=None):
     fetch_google_calendar_events(user)
     parse_and_store_tasks(user)
     tasks_with_locations = (
-        db.session.query(RawTask, Location)
-        .join(Location, RawTask.location_id == Location.location_id)
-        .filter(
-            RawTask.user_id == user.user_id,
-            Location.user_id == user.user_id
-        )
-        .order_by(RawTask.start_time)
-        .all()
+    db.session.query(RawTask, Location)
+    .join(Location, RawTask.location_id == Location.location_id)
+    .filter(
+        RawTask.user_id == user.user_id
+    )
+    .order_by(RawTask.start_time)
+    .all()
     )
 
     if not tasks_with_locations:

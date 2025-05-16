@@ -12,7 +12,6 @@ class User(db.Model):
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     # Relationships
-    locations = db.relationship('Location', backref='user', lazy=True, cascade='all, delete-orphan')
     raw_tasks = db.relationship('RawTask', backref='user', lazy=True, cascade='all, delete-orphan')
     scheduled_tasks = db.relationship('ScheduledTask', backref='user', lazy=True, cascade='all, delete-orphan')
     user_preferences = db.relationship('UserPreference', backref='user', lazy=True, cascade='all, delete-orphan')
@@ -23,11 +22,12 @@ class User(db.Model):
 class Location(db.Model):
     __tablename__ = 'locations'
     location_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
-    name = db.Column(db.String(100))
     address = db.Column(db.String(255))
-    latitude = db.Column(db.Float)
-    longitude = db.Column(db.Float)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint('latitude', 'longitude', name='uq_location_coords'),
+    )
 
 # ---------- Raw Tasks ----------
 
@@ -110,5 +110,3 @@ class ScheduledTask(db.Model):
     priority = db.Column(db.Integer, default=3)
     travel_eta_minutes = db.Column(db.Float)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
-
-# ---------- Schedule Logs ----------
