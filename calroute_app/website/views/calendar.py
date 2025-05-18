@@ -1,5 +1,5 @@
 import requests
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, timedelta
 from zoneinfo import ZoneInfo
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint
@@ -19,6 +19,15 @@ def fetch_google_calendar_events(user):
 
     time_min = start_of_day_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     time_max = end_of_day_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # instead of “00:00-to-23:59”, grab from *now* until the same time tomorrow
+    # now_local      = datetime.now(local_tz)
+    # tomorrow_local = now_local + timedelta(days=1)
+
+    # time_min = now_local.     astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    # time_max = tomorrow_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    print(f"▶️ Fetching calendar from {time_min} to {time_max}")
 
     response = requests.get(
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",

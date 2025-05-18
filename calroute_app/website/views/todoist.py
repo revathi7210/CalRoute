@@ -8,6 +8,7 @@ from website.location_resolver import resolve_location_for_task
 from website.google_maps_helper import find_nearest_location
 from todoist_api_python.api import TodoistAPI
 import google.generativeai as genai
+from sqlalchemy.exc import IntegrityError
 
 def split_content(content, chunk_size=500):
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
@@ -113,21 +114,28 @@ def parse_and_store_tasks(user):
                     )
 
                     if place_data:
-                        existing = Location.query.filter_by(
+                         # try reusing an existing Location
+                        location = Location.query.filter_by(
                             latitude=place_data["lat"],
                             longitude=place_data["lng"]
                         ).first()
-
-                        if existing:
-                            location = existing
-                        else:
+                        if not location:
                             location = Location(
                                 address=place_data["address"],
                                 latitude=place_data["lat"],
                                 longitude=place_data["lng"]
                             )
                             db.session.add(location)
-                            db.session.commit()
+                            try:
+                                # flush only this insert
+                                db.session.flush()
+                            except IntegrityError:
+                                # another thread/process just inserted it—rollback & re-fetch
+                                db.session.rollback()
+                                location = Location.query.filter_by(
+                                    latitude=place_data["lat"],
+                                    longitude=place_data["lng"]
+                                ).first()
 
         start_time = None
         if date != "none" and time_str != "none":
@@ -137,24 +145,38 @@ def parse_and_store_tasks(user):
                 ).replace(year=datetime.now().year)
             except Exception:
                 pass
-
-        raw_task = RawTask(
+        
+        # avoid inserting the same Todoist task twice
+        existing_task = RawTask.query.filter_by(
             user_id=user.user_id,
             source="todoist",
-            external_id=external_id,
-            title=task_title,
-            location_id=location.location_id if location else None,
-            start_time=start_time,
-            end_time=None,
-            due_date=start_time,
-            priority=3,
-            raw_data={},
-        )
-        try:
-            db.session.add(raw_task)
+            external_id=external_id
+        ).first()
+        if existing_task:
+            # update if location or time changed
+            existing_task.location_id = location.location_id if location else existing_task.location_id
+            existing_task.start_time   = start_time or existing_task.start_time
             db.session.commit()
-        except Exception:
-            db.session.rollback()
+        else:
+            raw_task = RawTask(
+                user_id=user.user_id,
+                source="todoist",
+                external_id=external_id,
+                title=task_title,
+                location_id=location.location_id if location else None,
+                start_time=start_time,
+                end_time=None,
+                due_date=start_time,
+                priority=3,
+                raw_data={},
+            )
+            try:
+                db.session.add(raw_task)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                db.session.add(raw_task)
+                db.session.commit()
 
 
 def get_today_tasks(todoist_token):
