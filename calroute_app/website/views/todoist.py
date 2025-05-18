@@ -94,9 +94,16 @@ def parse_and_store_tasks(user):
         if location_name.lower() != "none":
             location = resolve_location_for_task(user, location_name, task_title)
 
-        from website.llm_utils import call_gemini_for_location
+        from website.llm_utils import call_gemini_for_place_type, get_user_home_address, get_nearest_location_from_maps
         if location is None:
-            suggested_place = call_gemini_for_location(task_title)
+            print("before get home addr")
+            home_address = get_user_home_address()
+            print("after get home addr")
+            generic_place = call_gemini_for_place_type(task_title, home_address)
+            print(f"afetr generic place {generic_place}")
+            suggested_place = get_nearest_location_from_maps(home_address, generic_place)
+            print(f"after suggested place {suggested_place}")
+            print("next")
             if suggested_place:
                 user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
                 user_lat = user_lng = None
