@@ -10,6 +10,9 @@ from website.google_maps_helper import geocode_address
 calendar_bp = Blueprint('calendar', __name__)
 
 def fetch_google_calendar_events(user):
+    if not user.google_access_token:
+        return
+
     headers = {"Authorization": f"Bearer {user.google_access_token}"}
     local_tz = ZoneInfo("America/Los_Angeles")
     today_local = datetime.now(local_tz).date()
@@ -19,13 +22,6 @@ def fetch_google_calendar_events(user):
 
     time_min = start_of_day_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     time_max = end_of_day_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-    # instead of “00:00-to-23:59”, grab from *now* until the same time tomorrow
-    # now_local      = datetime.now(local_tz)
-    # tomorrow_local = now_local + timedelta(days=1)
-
-    # time_min = now_local.     astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    # time_max = tomorrow_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     print(f"▶️ Fetching calendar from {time_min} to {time_max}")
 
@@ -74,6 +70,9 @@ def fetch_google_calendar_events(user):
                         db.session.rollback()
                         continue
 
+        # Calculate duration in minutes
+        duration = int((end_dt - start_dt).total_seconds() / 60)
+
         raw_task = RawTask(
             user_id=user.user_id,
             source='google_calendar',
@@ -83,8 +82,9 @@ def fetch_google_calendar_events(user):
             start_time=start_dt,
             end_time=end_dt,
             location_id=location_obj.location_id if location_obj else None,
-            raw_data=event,
-            priority=1
+            priority=1,
+            duration=duration,
+            status='not_completed'
         )
         db.session.add(raw_task)
 

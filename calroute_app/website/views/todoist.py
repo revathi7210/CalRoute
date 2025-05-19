@@ -103,7 +103,7 @@ def parse_and_store_tasks(user):
             print(f"afetr generic place {generic_place}")
             suggested_place = get_nearest_location_from_maps(home_address, generic_place)
             print(f"after suggested place {suggested_place}")
-            print("next")
+            print("nexts")
             if suggested_place:
                 user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
                 user_lat = user_lng = None
@@ -162,7 +162,9 @@ def parse_and_store_tasks(user):
         if existing_task:
             # update if location or time changed
             existing_task.location_id = location.location_id if location else existing_task.location_id
-            existing_task.start_time   = start_time or existing_task.start_time
+            existing_task.start_time = start_time or existing_task.start_time
+            existing_task.due_date = start_time or existing_task.due_date
+            existing_task.title = task_title
             db.session.commit()
         else:
             raw_task = RawTask(
@@ -174,16 +176,27 @@ def parse_and_store_tasks(user):
                 start_time=start_time,
                 end_time=None,
                 due_date=start_time,
-                priority=3,
-                raw_data={},
+                priority=1,
+                duration=45,  # Default 45 minutes for Todoist tasks
+                status='not_completed'
             )
             try:
                 db.session.add(raw_task)
                 db.session.commit()
-            except Exception:
+            except IntegrityError:
                 db.session.rollback()
-                db.session.add(raw_task)
-                db.session.commit()
+                # Try one more time to find the task in case it was created by another request
+                existing_task = RawTask.query.filter_by(
+                    user_id=user.user_id,
+                    source="todoist",
+                    external_id=external_id
+                ).first()
+                if existing_task:
+                    existing_task.location_id = location.location_id if location else existing_task.location_id
+                    existing_task.start_time = start_time or existing_task.start_time
+                    existing_task.due_date = start_time or existing_task.due_date
+                    existing_task.title = task_title
+                    db.session.commit()
 
 
 def get_today_tasks(todoist_token):
