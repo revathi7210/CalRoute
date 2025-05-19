@@ -1,9 +1,10 @@
-from flask import Blueprint, jsonify, session, current_app
+from flask import Blueprint, jsonify, session, current_app, request
 from website.extensions import db
-from website.models import User, ScheduledTask, Location
+from website.models import User, ScheduledTask, Location, RawTask
 from website.views.calendar import fetch_google_calendar_events
 from website.views.todoist import parse_and_store_tasks
 from website.optimize_routes import run_optimization
+from datetime import datetime
 
 tasks_bp = Blueprint('tasks', __name__)
 
@@ -53,3 +54,103 @@ def get_scheduled_tasks():
         })
 
     return jsonify({"tasks": tasks})
+
+@tasks_bp.route("/api/tasks", methods=["POST"])
+def create_task():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json
+    if not data or not data.get("title"):
+        return jsonify({"error": "Title is required"}), 400
+
+    # Create a new raw task
+    raw_task = RawTask(
+        user_id=user_id,
+        source="todoist",
+        external_id=f"manual-{datetime.now().timestamp()}",
+        title=data.get("title"),
+        description=data.get("description"),
+        start_time=datetime.fromisoformat(data.get("start_time")) if data.get("start_time") else None,
+        end_time=datetime.fromisoformat(data.get("end_time")) if data.get("end_time") else None,
+        due_date=datetime.fromisoformat(data.get("due_date")) if data.get("due_date") else None,
+        priority=data.get("priority", 3),
+        raw_data={}
+    )
+
+    try:
+        db.session.add(raw_task)
+        db.session.commit()
+        
+        # Run optimization to schedule the new task
+        user = User.query.get(user_id)
+        run_optimization(user)
+        
+        return jsonify({"message": "Task created successfully", "task_id": raw_task.raw_task_id}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@tasks_bp.route("/api/tasks/<int:task_id>", methods=["PUT"])
+def update_task(task_id):
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+
+    data = request.json
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
+    # Update task fields
+    if "title" in data:
+        task.title = data["title"]
+    if "description" in data:
+        task.description = data["description"]
+    if "start_time" in data:
+        task.start_time = datetime.fromisoformat(data["start_time"]) if data["start_time"] else None
+    if "end_time" in data:
+        task.end_time = datetime.fromisoformat(data["end_time"]) if data["end_time"] else None
+    if "due_date" in data:
+        task.due_date = datetime.fromisoformat(data["due_date"]) if data["due_date"] else None
+    if "priority" in data:
+        task.priority = data["priority"]
+
+    try:
+        db.session.commit()
+        
+        # Re-run optimization to update the schedule
+        user = User.query.get(user_id)
+        run_optimization(user)
+        
+        return jsonify({"message": "Task updated successfully"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@tasks_bp.route("/api/tasks/<int:task_id>", methods=["DELETE"])
+def delete_task(task_id):
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+
+    try:
+        db.session.delete(task)
+        db.session.commit()
+        
+        # Re-run optimization to update the schedule
+        user = User.query.get(user_id)
+        run_optimization(user)
+        
+        return jsonify({"message": "Task deleted successfully"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500

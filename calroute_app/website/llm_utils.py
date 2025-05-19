@@ -48,6 +48,7 @@ Rules:
 2. Do NOT return business names or locations.
 3. Do NOT say "unknown", "location", "place", or similar.
 4. Use lowercase and underscores if needed.
+5. for watch movie suggest "movie_theater"
 
 Reply with only the place type.
 """
