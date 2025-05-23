@@ -1,6 +1,20 @@
 from flask_sqlalchemy import SQLAlchemy
 from .extensions import db
 
+# Association table for multi-select transit modes
+user_transit_modes = db.Table(
+    'user_transit_modes',
+    db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
+    db.Column('mode', db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'), primary_key=True)
+)
+
+# Association table for multi-select favorite grocery stores
+user_favorite_stores = db.Table(
+    'user_favorite_stores',
+    db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
+    db.Column('location_id', db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), primary_key=True)
+)
+
 # ---------- Core Entities ----------
 class User(db.Model):
     __tablename__ = 'users'
@@ -48,41 +62,46 @@ class RawTask(db.Model):
     status = db.Column(db.Enum('not_completed', 'completed', name='task_status'), default='not_completed', nullable=False)
     imported_at = db.Column(db.DateTime, server_default=db.func.now())
 
-
 # ---------- User Preferences ----------
 
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
     pref_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
+    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
 
     max_daily_hours = db.Column(db.Float, default=8.0)
     work_start_time = db.Column(db.Time, nullable=True)
     work_end_time = db.Column(db.Time, nullable=True)
 
-    travel_mode = db.Column(
-        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare',
-                name='travel_mode'),
-        default='car', nullable=True
-    )
-
     prioritization_style = db.Column(
-        db.Enum('important_first', 'quick_wins', 'balanced',
-                name='prioritization_style'),
+        db.Enum('important_first', 'quick_wins', 'balanced', name='prioritization_style'),
         default='balanced', nullable=False
     )
 
-    # NEW fields to link to Location table
+    # multi-select transit modes (up to 3 enforced in application logic)
+    transit_modes = db.relationship(
+        'TransitModeOption', secondary=user_transit_modes,
+        collection_class=set, cascade='all, delete', backref='preferences'
+    )
+
+    # link to home and favorite store as before, but remove single-mode column
     home_location_id = db.Column(
-        db.Integer,
-        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
-        nullable=True
+        db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
     )
     favorite_store_location_id = db.Column(
-        db.Integer,
-        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
-        nullable=True
+        db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
     )
+
+# lookup table for transit modes
+class TransitModeOption(db.Model):
+    __tablename__ = 'transit_mode_options'
+    mode = db.Column(
+        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'),
+        primary_key=True
+    )
+
+    def __repr__(self):
+        return f"<TransitModeOption {self.mode}>"
 
 # ---------- User Habits ----------
 
