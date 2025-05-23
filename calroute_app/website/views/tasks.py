@@ -48,11 +48,18 @@ def get_scheduled_tasks():
             continue
         tasks.append({
             "id": sched_task.sched_task_id,
+            "raw_task_id": sched_task.raw_task_id if hasattr(sched_task, 'raw_task_id') else None,
             "title": sched_task.title,
             "start_time": sched_task.scheduled_start_time.strftime("%-I:%M %p"),
             "end_time": sched_task.scheduled_end_time.strftime("%-I:%M %p"),
             "lat": location.latitude,
             "lng": location.longitude,
+            "location_name": getattr(location, 'name', None),
+            "location_address": getattr(location, 'address', None),
+            "description": getattr(sched_task, 'description', ''),
+            "priority": getattr(sched_task, 'priority', 1),
+            "transit_mode": getattr(sched_task, 'transit_mode', None),
+            "is_completed": getattr(sched_task, 'is_completed', False),
         })
 
     return jsonify({"tasks": tasks})
