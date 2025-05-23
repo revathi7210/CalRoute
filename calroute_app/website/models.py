@@ -90,6 +90,9 @@ class UserPreference(db.Model):
     )
     favorite_store_location_id = db.Column(
         db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
+    )   
+    gym_location_id = db.Column(
+        db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
     )
 
 # lookup table for transit modes
