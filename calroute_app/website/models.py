@@ -1,18 +1,18 @@
 from flask_sqlalchemy import SQLAlchemy
 from .extensions import db
 
-# Association table for multi-select transit modes
+# ---------- Association tables for multi-select fields ----------
 user_transit_modes = db.Table(
     'user_transit_modes',
     db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
     db.Column('mode', db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'), primary_key=True)
 )
 
-# Association table for multi-select favorite grocery stores
 user_favorite_stores = db.Table(
     'user_favorite_stores',
     db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
-    db.Column('location_id', db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), primary_key=True)
+    # Use ON DELETE CASCADE here since NULL is not allowed on a primary key
+    db.Column('location_id', db.Integer, db.ForeignKey('locations.location_id', ondelete='CASCADE'), primary_key=True)
 )
 
 # ---------- Core Entities ----------
@@ -25,14 +25,12 @@ class User(db.Model):
     todoist_token = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
-    # Relationships
     raw_tasks = db.relationship('RawTask', backref='user', lazy=True, cascade='all, delete-orphan')
     scheduled_tasks = db.relationship('ScheduledTask', backref='user', lazy=True, cascade='all, delete-orphan')
     user_preferences = db.relationship('UserPreference', backref='user', lazy=True, cascade='all, delete-orphan')
     user_habits = db.relationship('UserHabit', backref='user', lazy=True, cascade='all, delete-orphan')
 
 # ---------- Locations ----------
-
 class Location(db.Model):
     __tablename__ = 'locations'
     location_id = db.Column(db.Integer, primary_key=True)
@@ -43,8 +41,17 @@ class Location(db.Model):
         db.UniqueConstraint('latitude', 'longitude', name='uq_location_coords'),
     )
 
-# ---------- Raw Tasks ----------
+# ---------- Transit Mode Options (lookup) ----------
+class TransitModeOption(db.Model):
+    __tablename__ = 'transit_mode_options'
+    mode = db.Column(
+        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'),
+        primary_key=True
+    )
+    def __repr__(self):
+        return f"<TransitModeOption {self.mode}>"
 
+# ---------- Raw Tasks ----------
 class RawTask(db.Model):
     __tablename__ = 'raw_tasks'
     raw_task_id = db.Column(db.Integer, primary_key=True)
@@ -58,12 +65,11 @@ class RawTask(db.Model):
     end_time = db.Column(db.DateTime, nullable=True)
     due_date = db.Column(db.DateTime, nullable=True)
     priority = db.Column(db.Integer, default=3)
-    duration = db.Column(db.Integer, nullable=True)  # Duration in minutes
+    duration = db.Column(db.Integer, nullable=True)
     status = db.Column(db.Enum('not_completed', 'completed', name='task_status'), default='not_completed', nullable=False)
     imported_at = db.Column(db.DateTime, server_default=db.func.now())
 
 # ---------- User Preferences ----------
-
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
     pref_id = db.Column(db.Integer, primary_key=True)
@@ -78,36 +84,29 @@ class UserPreference(db.Model):
         default='balanced', nullable=False
     )
 
-    # multi-select transit modes (up to 3 enforced in application logic)
+    # Multi-select transit modes (up to 3 enforced in application logic)
     transit_modes = db.relationship(
         'TransitModeOption', secondary=user_transit_modes,
         collection_class=set, cascade='all, delete', backref='preferences'
     )
 
-    # link to home and favorite store as before, but remove single-mode column
+    # Single-location fields
     home_location_id = db.Column(
         db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
     )
     favorite_store_location_id = db.Column(
         db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
-    )   
+    )
     gym_location_id = db.Column(
         db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
     )
 
-# lookup table for transit modes
-class TransitModeOption(db.Model):
-    __tablename__ = 'transit_mode_options'
-    mode = db.Column(
-        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'),
-        primary_key=True
-    )
-
-    def __repr__(self):
-        return f"<TransitModeOption {self.mode}>"
+    # Relationships for single-location fields
+    home_location = db.relationship('Location', foreign_keys=[home_location_id])
+    favorite_store_location = db.relationship('Location', foreign_keys=[favorite_store_location_id])
+    gym_location = db.relationship('Location', foreign_keys=[gym_location_id])
 
 # ---------- User Habits ----------
-
 class UserHabit(db.Model):
     __tablename__ = 'user_habits'
     habit_id = db.Column(db.Integer, primary_key=True)
@@ -118,7 +117,6 @@ class UserHabit(db.Model):
     weight = db.Column(db.Float, default=1.0)
 
 # ---------- Scheduled Tasks ----------
-
 class ScheduledTask(db.Model):
     __tablename__ = 'scheduled_tasks'
     sched_task_id = db.Column(db.Integer, primary_key=True)
