@@ -35,7 +35,7 @@ class RawTask(db.Model):
     __tablename__ = 'raw_tasks'
     raw_task_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
-    source = db.Column(db.Enum('google_calendar', 'todoist', name='task_source'), nullable=False)
+    source = db.Column(db.Enum('google_calendar', 'todoist', 'manual', name='task_source'), nullable=False)
     external_id = db.Column(db.String(255), unique=True, nullable=False)
     title = db.Column(db.String(255))
     description = db.Column(db.Text)

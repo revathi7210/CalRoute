@@ -40,17 +40,25 @@ def fetch_google_calendar_events(user):
 
     events = response.json().get("items", [])
     for event in events:
+        # Skip events that are already in our database
+        if RawTask.query.filter_by(external_id=event["id"], source='google_calendar').first():
+            continue
+
+        # Get start and end times
         start = event.get("start", {}).get("dateTime")
         end = event.get("end", {}).get("dateTime")
         if not start or not end:
             continue
 
-        start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
-        end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+        # Convert to local timezone
+        start_dt = datetime.fromisoformat(start.replace('Z', '+00:00')).astimezone(local_tz)
+        end_dt = datetime.fromisoformat(end.replace('Z', '+00:00')).astimezone(local_tz)
 
-        if RawTask.query.filter_by(external_id=event["id"], source='google_calendar').first():
+        # Skip events that are not today
+        if start_dt.date() != today_local:
             continue
 
+        # Handle location
         location_obj = None
         loc_name = event.get("location")
         if loc_name:
@@ -73,6 +81,7 @@ def fetch_google_calendar_events(user):
         # Calculate duration in minutes
         duration = int((end_dt - start_dt).total_seconds() / 60)
 
+        # Create the raw task
         raw_task = RawTask(
             user_id=user.user_id,
             source='google_calendar',
@@ -82,7 +91,7 @@ def fetch_google_calendar_events(user):
             start_time=start_dt,
             end_time=end_dt,
             location_id=location_obj.location_id if location_obj else None,
-            priority=1,
+            priority=1,  # Calendar events are high priority
             duration=duration,
             status='not_completed'
         )

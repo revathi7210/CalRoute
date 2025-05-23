@@ -12,6 +12,7 @@ optimize_bp = Blueprint("optimize", __name__)
 # --- Morning Schedule (default from home) ---
 @optimize_bp.route("/api/optimize_schedule", methods=["POST"])
 def optimize_schedule():
+    """Initial schedule optimization with fresh data sync"""
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -20,7 +21,7 @@ def optimize_schedule():
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    success = run_optimization(user)
+    success = run_optimization(user, sync_mode=True)
     if not success:
         return jsonify({"error": "Could not generate optimized route"}), 500
 
@@ -29,6 +30,7 @@ def optimize_schedule():
 # --- Dynamic Schedule (re-optimization with current location) ---
 @optimize_bp.route("/api/dynamic_schedule", methods=["POST"])
 def dynamic_schedule():
+    """Re-optimize schedule based on current location"""
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
@@ -51,6 +53,92 @@ def dynamic_schedule():
 
     return jsonify({"success": True, "message": "Route re-optimized from current location."})
 
+@optimize_bp.route("/api/reoptimize", methods=["POST"])
+def reoptimize_schedule():
+    """Re-optimize schedule after task edits"""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    success = run_optimization(user)
+    if not success:
+        return jsonify({"error": "Could not re-optimize schedule"}), 500
+
+    return jsonify({"success": True, "message": "Schedule re-optimized."})
+
+@optimize_bp.route("/api/check-pending-tasks", methods=["GET"])
+def check_pending_tasks():
+    """Check for tasks that need completion status"""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Get tasks scheduled for today that are not completed
+    today = datetime.now().date()
+    pending_tasks = (
+        ScheduledTask.query
+        .filter(
+            ScheduledTask.user_id == user_id,
+            ScheduledTask.scheduled_start_time >= today,
+            ScheduledTask.scheduled_start_time < today + timedelta(days=1),
+            ScheduledTask.status == "pending"
+        )
+        .order_by(ScheduledTask.scheduled_start_time)
+        .all()
+    )
+
+    tasks_data = [{
+        "scheduled_task_id": task.scheduled_task_id,
+        "title": task.title,
+        "scheduled_start_time": task.scheduled_start_time.isoformat(),
+        "scheduled_end_time": task.scheduled_end_time.isoformat()
+    } for task in pending_tasks]
+
+    return jsonify({
+        "has_pending_tasks": len(pending_tasks) > 0,
+        "tasks": tasks_data
+    })
+
+@optimize_bp.route("/api/update-task-completion", methods=["POST"])
+def update_task_completion():
+    """Update completion status of tasks"""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.json
+    if not data or "completed_tasks" not in data:
+        return jsonify({"error": "No completion data provided"}), 400
+
+    completed_task_ids = data["completed_tasks"]
+    
+    # Update scheduled tasks
+    for task_id in completed_task_ids:
+        scheduled_task = ScheduledTask.query.get(task_id)
+        if scheduled_task and scheduled_task.user_id == user_id:
+            scheduled_task.status = "completed"
+            
+            # Update corresponding raw task
+            raw_task = RawTask.query.get(scheduled_task.raw_task_id)
+            if raw_task:
+                raw_task.status = "completed"
+
+    db.session.commit()
+
+    # Reoptimize remaining tasks
+    user = User.query.get(user_id)
+    success = run_optimization(user)
+
+    return jsonify({
+        "success": True,
+        "message": "Task completion status updated and schedule reoptimized",
+        "reoptimization_success": success
+    })
+
 def reverse_geocode_osm(lat: float, lng: float) -> str | None:
     url = "https://nominatim.openstreetmap.org/reverse"
     params = {
@@ -65,29 +153,40 @@ def reverse_geocode_osm(lat: float, lng: float) -> str | None:
 # → "Google Building 41, Amphitheatre Parkway, Mountain View, Santa Clara County, California, 94043, United States"
 
 
-def run_optimization(user, current_lat=None, current_lng=None):
+def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
+    """
+    Run optimization for tasks based on different scenarios.
+    
+    Args:
+        user: User object
+        current_lat: Current latitude (optional)
+        current_lng: Current longitude (optional)
+        sync_mode: If True, fetches fresh data from Todoist and Calendar
+    """
     from .maps_utils import build_distance_matrix
     from .views.calendar import fetch_google_calendar_events
     from .views.todoist import parse_and_store_tasks
 
-    from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-    #RawTask.query.filter_by(user_id=user.user_id).delete()
-    #db.session.commit()
+    # If in sync mode, fetch fresh data from external sources
+    if sync_mode:
+        fetch_google_calendar_events(user)
+        parse_and_store_tasks(user)
+        db.session.commit()
 
-    #fetch_google_calendar_events(user)
-    #parse_and_store_tasks(user)
+    # Get tasks with locations
     tasks_with_locations = (
         db.session.query(RawTask, Location)
-        .join(Location, RawTask.location_id == Location.location_id)
+        .outerjoin(Location, RawTask.location_id == Location.location_id)
         .filter(
-            RawTask.user_id == user.user_id
+            RawTask.user_id == user.user_id,
+            RawTask.status == 'not_completed'  # Only optimize incomplete tasks
         )
         .order_by(RawTask.start_time)
         .all()
     )
 
     if not tasks_with_locations:
-        print("No tasks with locations found.")
+        print("No tasks found.")
         return False
 
     pref = UserPreference.query.filter_by(user_id=user.user_id).first()
@@ -103,11 +202,13 @@ def run_optimization(user, current_lat=None, current_lng=None):
     print(home_address)
     now = datetime.now()
 
+    # Prepare optimization data
     locations = []
     durations = []
     time_windows = []
+    task_indices = []  # Keep track of which tasks we're including
 
-    # 1) current-location first
+    # Add starting location (current location or home)
     if current_lat and current_lng:
         current_loc = reverse_geocode_osm(current_lat, current_lng)
         print("current_loc:", current_loc)
@@ -119,19 +220,23 @@ def run_optimization(user, current_lat=None, current_lng=None):
         durations.append(0)
         time_windows.append((0, 1440))
 
-    # 2) then each task
-    for task, loc in tasks_with_locations:
-        locations.append(loc.address)
+    # Add task locations
+    for i, (task, loc) in enumerate(tasks_with_locations):
+        # Skip tasks that have fixed times (like calendar events)
+        if task.source == 'google_calendar' and task.start_time and task.end_time:
+            continue
 
-        # 1) Determine service duration
-        if task.start_time and task.end_time:
-            dur = int((task.end_time - task.start_time).total_seconds() // 60)
+        # For tasks without location, use home address
+        if not loc:
+            locations.append(home_address)
         else:
-            # No fixed start: default to 30 minutes
-            dur = 30
-        durations.append(dur)
+            locations.append(loc.address)
+        
+        # Use task duration if specified, otherwise use default
+        duration = task.duration if task.duration else 45
+        durations.append(duration)
 
-        # 2) Build time window
+        # Build time window based on task constraints
         if task.start_time:
             start_min = task.start_time.hour * 60 + task.start_time.minute
         else:
@@ -143,28 +248,14 @@ def run_optimization(user, current_lat=None, current_lng=None):
             end_min = 24 * 60  # whole day
 
         time_windows.append((start_min, end_min))
+        task_indices.append(i)
 
-    # for task, loc in tasks_with_locations:
-    #     locations.append(loc.address)
-
-    #     # duration in minutes (or a default)
-    #     if task.start_time and task.end_time:
-    #         delta = task.end_time - task.start_time
-    #         dur = int(delta.total_seconds() // 60)
-    #     else:
-    #         dur = 30
-    #     durations.append(dur)
-
-    #     # time window
-    #     start_min = (task.start_time.hour * 60 + task.start_time.minute) if task.start_time else 0
-    #     end_min = (task.end_time.hour * 60 + task.end_time.minute) if task.end_time else 1440
-    #     time_windows.append((start_min, end_min))
-
-    
+    # Add home location as end point
     locations.append(home_address)
     durations.append(0)
     time_windows.append((0, 1440))
 
+    # Build and solve
     distance_matrix = build_distance_matrix(locations)
     n = len(distance_matrix)
 
@@ -184,37 +275,49 @@ def run_optimization(user, current_lat=None, current_lng=None):
         print(f"{i}: {row_str}")
     print("\n")
 
-    #start_index = 0
-    #end_index = n-1
-    #route = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows, start_index=start_index, end_index=end_index)
     route, start_times = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows)
     for i, start_time in enumerate(start_times):
         print(f"{i}: {start_time}")
-    ## UPDATE THIS TO NOT DELETE
+
+    # Clear existing scheduled tasks
     ScheduledTask.query.filter_by(user_id=user.user_id).delete()
     db.session.commit()
 
     print("tasksloc")
     print(tasks_with_locations)
     today = datetime.now().date()
+
+    # First, schedule fixed-time tasks (like calendar events)
+    for task, _ in tasks_with_locations:
+        if task.source == 'google_calendar' and task.start_time and task.end_time:
+            sched = ScheduledTask(
+                user_id=user.user_id,
+                raw_task_id=task.raw_task_id,
+                title=task.title,
+                description=task.description,
+                location_id=task.location_id,
+                scheduled_start_time=task.start_time,
+                scheduled_end_time=task.end_time,
+                status="pending",
+                priority=task.priority,
+                travel_eta_minutes=0
+            )
+            db.session.add(sched)
+
+    # Then schedule flexible tasks
     for idx in route:
-        # skip start and end depots
-        if idx == 0 or idx == n-1:
+        # Skip start and end depots
+        if idx == 0 or idx == len(locations)-1:
             continue
 
-        task_idx = idx - 1
+        task_idx = task_indices[idx - 1]  # Adjust index to account for skipped tasks
         raw, _ = tasks_with_locations[task_idx]
         dur = durations[idx]
 
-        # priority 1 → use original calendar times
-        if raw.priority == 1 and raw.start_time and raw.end_time:
-            st = raw.start_time
-            et = raw.end_time
-        else:
-            # solver time in minutes since midnight
-            mins = start_times[idx]
-            st = datetime.combine(today, time(mins // 60, mins % 60))
-            et = st + timedelta(minutes=dur)
+        # Use solver's optimized times
+        mins = start_times[idx]
+        st = datetime.combine(today, time(mins // 60, mins % 60))
+        et = st + timedelta(minutes=dur)
 
         sched = ScheduledTask(
             user_id=user.user_id,
