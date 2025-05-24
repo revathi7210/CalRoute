@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, session, redirect, url_for
 from website.extensions import db
-from website.models import User, UserPreference, Location
+from website.models import User, UserPreference, Location, TransitModeOption
 from website.google_maps_helper import geocode_address
 from datetime import datetime, time
 from sqlalchemy import func
@@ -100,45 +100,80 @@ def get_preferences():
 
 @preferences_bp.route("/preferences", methods=["POST"])
 def set_preferences():
+    print("\n--- PREFERENCES ROUTE HIT ---")
     user_id = session.get("user_id")
     if not user_id:
-        return redirect(url_for("main.landing"))
+        print("ERROR: User not in session.")
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    print(f"Authenticated user ID: {user_id}")
 
-    data = request.json or request.form
+    data = request.get_json(silent=True)
     if not data:
+        print("ERROR: No JSON data received.")
         return jsonify({"error": "Missing data"}), 400
+
+    print("Received data from frontend:")
+    print(data) # This is the most important print!
 
     pref = UserPreference.query.filter_by(user_id=user_id).first()
     if not pref:
+        print("No existing preference found, creating a new one.")
         pref = UserPreference(user_id=user_id)
+        db.session.add(pref)
+    else:
+        print("Found existing preference object.")
 
-    # Update basic preferences
-    if 'max_daily_hours' in data:
-        pref.max_daily_hours = float(data['max_daily_hours'])
-    if 'work_start_time' in data:
-        pref.work_start_time = parse_time_str(data['work_start_time'])
-    if 'work_end_time' in data:
-        pref.work_end_time = parse_time_str(data['work_end_time'])
-    if 'travel_mode' in data:
-        pref.travel_mode = data['travel_mode']
-    if 'prioritization_style' in data:
-        pref.prioritization_style = data['prioritization_style']
+    # --- Update Basic Preferences ---
+    pref.max_daily_hours = float(data.get('max_daily_hours', pref.max_daily_hours or 8.0))
+    pref.work_start_time = parse_time_str(data.get('work_start_time')) or pref.work_start_time
+    pref.work_end_time = parse_time_str(data.get('work_end_time')) or pref.work_end_time
+    pref.prioritization_style = data.get('prioritization_style', pref.prioritization_style or 'balanced')
+    print(f"Style set to: {pref.prioritization_style}")
 
-    # Handle locations
-    home_addr = data.get("home_address")
-    home_location = get_or_create_location(home_addr)
-    if home_location:
-        pref.home_location_id = home_location.location_id
+    # --- Update Transit Modes (Many-to-Many) ---
+    transit_mode_names = data.get('transit_modes', [])
+    print(f"Received transit modes: {transit_mode_names}")
+    
+    pref.transit_modes.clear()
+    if transit_mode_names:
+        mode_objects = TransitModeOption.query.filter(TransitModeOption.mode.in_(transit_mode_names)).all()
+        print(f"Found mode objects in DB: {[m.mode for m in mode_objects]}")
+        for mode_obj in mode_objects:
+            pref.transit_modes.add(mode_obj)
 
-    fav_addr = data.get("favorite_store_address")
-    fav_location = get_or_create_location(fav_addr)
-    if fav_location:
-        pref.favorite_store_location_id = fav_location.location_id
+    # --- Update Locations (Single and Many-to-Many) ---
+    # Home Location
+    if home_addr := data.get("home_address"):
+        print(f"Processing home address: {home_addr}")
+        if home_location := get_or_create_location(home_addr):
+            pref.home_location = home_location
+            print(f"Set home location to ID: {home_location.location_id}")
+
+    # Gym Location
+    if gym_addr := data.get("gym_address"):
+        print(f"Processing gym address: {gym_addr}")
+        if gym_location := get_or_create_location(gym_addr):
+            pref.gym_location = gym_location
+            print(f"Set gym location to ID: {gym_location.location_id}")
+
+    # Favorite Grocery Stores
+    fav_store_addresses = data.get('favorite_stores', [])
+    print(f"Processing favorite stores: {fav_store_addresses}")
+    
+    pref.favorite_store_locations.clear()
+    if fav_store_addresses:
+        for store_addr in fav_store_addresses:
+            if store_location := get_or_create_location(store_addr):
+                pref.favorite_store_locations.append(store_location)
+                print(f"Appended store location ID: {store_location.location_id}")
 
     try:
-        db.session.add(pref)
+        print("Attempting to commit to database...")
         db.session.commit()
-        return jsonify({"message": "Preferences saved", "redirect": "/homepage"}), 200
-    except IntegrityError as e:
+        print("✅ COMMIT SUCCESSFUL!")
+        return jsonify({"message": "Preferences saved successfully!"}), 200
+    except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Failed to save preferences"}), 500
+        print(f"❌ DATABASE ERROR: {e}")
+        return jsonify({"error": "An unexpected error occurred during save."}), 500

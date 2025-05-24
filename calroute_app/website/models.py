@@ -1,21 +1,23 @@
 from flask_sqlalchemy import SQLAlchemy
 from .extensions import db
 
-# ---------- Association tables for multi-select fields ----------
+# ---------- Association Tables ----------
+# Multi-select for up to three transit modes per user preference
 user_transit_modes = db.Table(
     'user_transit_modes',
     db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
-    db.Column('mode', db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'), primary_key=True)
+    db.Column('mode', db.String(20), db.ForeignKey('transit_mode_options.mode', ondelete='CASCADE'), primary_key=True)
 )
 
+# Multi-select for up to three favorite stores per user preference
 user_favorite_stores = db.Table(
     'user_favorite_stores',
     db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
-    # Use ON DELETE CASCADE here since NULL is not allowed on a primary key
     db.Column('location_id', db.Integer, db.ForeignKey('locations.location_id', ondelete='CASCADE'), primary_key=True)
 )
 
 # ---------- Core Entities ----------
+
 class User(db.Model):
     __tablename__ = 'users'
     user_id = db.Column(db.Integer, primary_key=True)
@@ -30,28 +32,26 @@ class User(db.Model):
     user_preferences = db.relationship('UserPreference', backref='user', lazy=True, cascade='all, delete-orphan')
     user_habits = db.relationship('UserHabit', backref='user', lazy=True, cascade='all, delete-orphan')
 
-# ---------- Locations ----------
+
 class Location(db.Model):
     __tablename__ = 'locations'
     location_id = db.Column(db.Integer, primary_key=True)
-    address = db.Column(db.String(255))
+    address = db.Column(db.String(255), nullable=False)
     latitude = db.Column(db.Float, nullable=False)
     longitude = db.Column(db.Float, nullable=False)
     __table_args__ = (
         db.UniqueConstraint('latitude', 'longitude', name='uq_location_coords'),
     )
 
-# ---------- Transit Mode Options (lookup) ----------
+
 class TransitModeOption(db.Model):
     __tablename__ = 'transit_mode_options'
-    mode = db.Column(
-        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare', name='travel_mode'),
-        primary_key=True
-    )
+    mode = db.Column(db.String(20), primary_key=True)
+    # You can enforce choices in your app logic: 'car','bike','bus_train','walking','rideshare'
     def __repr__(self):
         return f"<TransitModeOption {self.mode}>"
 
-# ---------- Raw Tasks ----------
+
 class RawTask(db.Model):
     __tablename__ = 'raw_tasks'
     raw_task_id = db.Column(db.Integer, primary_key=True)
@@ -65,11 +65,11 @@ class RawTask(db.Model):
     end_time = db.Column(db.DateTime, nullable=True)
     due_date = db.Column(db.DateTime, nullable=True)
     priority = db.Column(db.Integer, default=3)
-    duration = db.Column(db.Integer, nullable=True)
+    duration = db.Column(db.Integer, nullable=True)  # in minutes
     status = db.Column(db.Enum('not_completed', 'completed', name='task_status'), default='not_completed', nullable=False)
     imported_at = db.Column(db.DateTime, server_default=db.func.now())
 
-# ---------- User Preferences ----------
+
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
     pref_id = db.Column(db.Integer, primary_key=True)
@@ -84,29 +84,28 @@ class UserPreference(db.Model):
         default='balanced', nullable=False
     )
 
-    # Multi-select transit modes (up to 3 enforced in application logic)
+    # Multi-select relationships (enforce up to 3 in app logic)
     transit_modes = db.relationship(
-        'TransitModeOption', secondary=user_transit_modes,
-        collection_class=set, cascade='all, delete', backref='preferences'
+        'TransitModeOption',
+        secondary=user_transit_modes,
+        collection_class=set,
+        backref='user_preferences'
     )
 
-    # Single-location fields
-    home_location_id = db.Column(
-        db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
-    )
-    favorite_store_location_id = db.Column(
-        db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
-    )
-    gym_location_id = db.Column(
-        db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True
+    favorite_store_locations = db.relationship(
+        'Location',
+        secondary=user_favorite_stores,
+        backref='favored_by_users'
     )
 
-    # Relationships for single-location fields
-    home_location = db.relationship('Location', foreign_keys=[home_location_id])
-    favorite_store_location = db.relationship('Location', foreign_keys=[favorite_store_location_id])
-    gym_location = db.relationship('Location', foreign_keys=[gym_location_id])
+    # Home & Gym locations
+    home_location_id = db.Column(db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True)
+    gym_location_id = db.Column(db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True)
 
-# ---------- User Habits ----------
+    home_location = db.relationship('Location', foreign_keys=[home_location_id], post_update=True, backref='home_for_preferences')
+    gym_location = db.relationship('Location', foreign_keys=[gym_location_id], post_update=True, backref='gym_for_preferences')
+
+
 class UserHabit(db.Model):
     __tablename__ = 'user_habits'
     habit_id = db.Column(db.Integer, primary_key=True)
@@ -116,7 +115,7 @@ class UserHabit(db.Model):
     duration_minutes = db.Column(db.Integer)
     weight = db.Column(db.Float, default=1.0)
 
-# ---------- Scheduled Tasks ----------
+
 class ScheduledTask(db.Model):
     __tablename__ = 'scheduled_tasks'
     sched_task_id = db.Column(db.Integer, primary_key=True)
