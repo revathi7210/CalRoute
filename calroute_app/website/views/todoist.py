@@ -9,6 +9,7 @@ from website.google_maps_helper import find_nearest_location
 from todoist_api_python.api import TodoistAPI
 import google.generativeai as genai
 from sqlalchemy.exc import IntegrityError
+from website.llm_utils import call_gemini_for_place_type, get_user_home_address, get_nearest_location_from_maps, VALID_GOOGLE_PLACE_TYPES
 
 def split_content(content, chunk_size=500):
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
@@ -90,20 +91,22 @@ def parse_and_store_tasks(user):
         if existing_task:
             continue
 
+        home_address = get_user_home_address()
+        generic_place = call_gemini_for_place_type(task_title, home_address)
+        print(f"LLM returned generic_place: {generic_place}")
+
+        place_type = generic_place if generic_place else None
+        is_flexible = bool(place_type and place_type in VALID_GOOGLE_PLACE_TYPES)
+
         location = None
+        # Try to resolve a specific location if location_name is given
         if location_name.lower() != "none":
             location = resolve_location_for_task(user, location_name, task_title)
 
-        from website.llm_utils import call_gemini_for_place_type, get_user_home_address, get_nearest_location_from_maps
-        if location is None:
-            print("before get home addr")
-            home_address = get_user_home_address()
-            print("after get home addr")
-            generic_place = call_gemini_for_place_type(task_title, home_address)
-            print(f"afetr generic place {generic_place}")
-            suggested_place = get_nearest_location_from_maps(home_address, generic_place)
-            print(f"after suggested place {suggested_place}")
-            print("nexts")
+        # If no specific location, try to find a nearby one of the place_type
+        if not location and is_flexible:
+            suggested_place = get_nearest_location_from_maps(home_address, place_type)
+            print(f"Suggested place from maps: {suggested_place}")
             if suggested_place:
                 user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
                 user_lat = user_lng = None
@@ -121,7 +124,7 @@ def parse_and_store_tasks(user):
                     )
 
                     if place_data:
-                         # try reusing an existing Location
+                        # try reusing an existing Location
                         location = Location.query.filter_by(
                             latitude=place_data["lat"],
                             longitude=place_data["lng"]
@@ -134,15 +137,15 @@ def parse_and_store_tasks(user):
                             )
                             db.session.add(location)
                             try:
-                                # flush only this insert
                                 db.session.flush()
                             except IntegrityError:
-                                # another thread/process just inserted it—rollback & re-fetch
                                 db.session.rollback()
                                 location = Location.query.filter_by(
                                     latitude=place_data["lat"],
                                     longitude=place_data["lng"]
                                 ).first()
+
+        print(f"Creating RawTask: title={task_title}, is_flexible={is_flexible}, place_type={place_type}, location_id={location.location_id if location else None}")
 
         start_time = None
         if date != "none" and time_str != "none":
@@ -165,6 +168,8 @@ def parse_and_store_tasks(user):
             existing_task.start_time = start_time or existing_task.start_time
             existing_task.due_date = start_time or existing_task.due_date
             existing_task.title = task_title
+            existing_task.is_location_flexible = is_flexible
+            existing_task.place_type = place_type
             db.session.commit()
         else:
             raw_task = RawTask(
@@ -178,11 +183,14 @@ def parse_and_store_tasks(user):
                 due_date=start_time,
                 priority=1,
                 duration=45,  # Default 45 minutes for Todoist tasks
-                status='not_completed'
+                status='not_completed',
+                is_location_flexible=is_flexible,
+                place_type=place_type
             )
             try:
                 db.session.add(raw_task)
                 db.session.commit()
+                print(f"Committed RawTask: title={task_title}, is_flexible={is_flexible}, place_type={place_type}, location_id={location.location_id if location else None}")
             except IntegrityError:
                 db.session.rollback()
                 # Try one more time to find the task in case it was created by another request
@@ -196,7 +204,10 @@ def parse_and_store_tasks(user):
                     existing_task.start_time = start_time or existing_task.start_time
                     existing_task.due_date = start_time or existing_task.due_date
                     existing_task.title = task_title
+                    existing_task.is_location_flexible = is_flexible
+                    existing_task.place_type = place_type
                     db.session.commit()
+                    print(f"Updated existing RawTask after conflict: title={task_title}, is_flexible={is_flexible}, place_type={place_type}, location_id={location.location_id if location else None}")
 
 
 def get_today_tasks(todoist_token):

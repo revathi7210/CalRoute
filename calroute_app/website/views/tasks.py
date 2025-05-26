@@ -3,10 +3,13 @@ from website.extensions import db
 from website.models import User, ScheduledTask, Location, RawTask
 from website.views.calendar import fetch_google_calendar_events
 from website.views.todoist import parse_and_store_tasks
-from website.optimize_routes import run_optimization
 from datetime import datetime
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
+import traceback
 from website.google_maps_helper import geocode_address
+from website.optimize_routes import run_optimization
+from website.views.flexible_location_helper import update_flexible_task_locations
+from website.location_resolver import handle_task_mutation
 
 tasks_bp = Blueprint('tasks', __name__)
 
@@ -108,23 +111,43 @@ def create_task():
         priority=data.get("priority", 3),
         duration=data.get("duration", 45),  # Default 45 minutes if not specified
         status=data.get("status", "not_completed"),  # Default status if not specified
-        location_id=location_id  # Add the location_id to the raw task
+        location_id=location_id,  # Add the location_id to the raw task
+        is_location_flexible=False,  # Add is_location_flexible flag
+        place_type=None  # Add place type if provided
     )
 
     try:
         db.session.add(raw_task)
         db.session.commit()
+        current_app.logger.info(f"Created new task: {raw_task.raw_task_id} - {raw_task.title}")
         
-        # Run optimization to schedule the new task
-        user = User.query.get(user_id)
-        run_optimization(user)
-        
-        # Redirect to get scheduled tasks
-        return get_scheduled_tasks()
+        try:
+            # Run the optimization pipeline
+            current_app.logger.info(f"Starting optimization for user {user_id} after task creation")
+            handle_task_mutation(user_id)
+            current_app.logger.info("Optimization completed successfully")
+            
+            # Return updated scheduled tasks
+            return get_scheduled_tasks()
+        except Exception as opt_error:
+            # If optimization fails, we still created the task successfully
+            # Log the error but return success to the user
+            current_app.logger.error(f"Optimization error: {str(opt_error)}")
+            current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+            
+            return jsonify({
+                "message": "Task created successfully, but schedule optimization failed", 
+                "task_id": raw_task.raw_task_id,
+                "title": raw_task.title,
+                "optimization_error": str(opt_error)
+            })
 
     except Exception as e:
         db.session.rollback()
+        current_app.logger.error(f"Error creating task: {str(e)}")
+        current_app.logger.error(f"Stack trace: {traceback.format_exc()}") 
         return jsonify({"error": str(e)}), 500
+
 
 @tasks_bp.route("/api/tasks/<int:task_id>", methods=["PUT"])
 def update_task(task_id):
@@ -158,39 +181,131 @@ def update_task(task_id):
     if "status" in data:
         task.status = data["status"]
 
+    # Handle location update
+    if data.get("location_name") or data.get("location_address"):
+        location_str = data.get("location_name") or data.get("location_address")
+        lat, lng = geocode_address(location_str)
+        if lat is None or lng is None:
+            return jsonify({"error": "Could not geocode the provided location"}), 400
+        location = Location.query.filter_by(latitude=lat, longitude=lng).first()
+        if not location:
+            location = Location(
+                address=location_str,
+                latitude=lat,
+                longitude=lng
+            )
+            db.session.add(location)
+            db.session.flush()
+        task.location_id = location.location_id
+
     try:
         db.session.commit()
+        current_app.logger.info(f"Updated task: {task.raw_task_id} - {task.title}")
         
-        # Re-run optimization to update the schedule
-        user = User.query.get(user_id)
-        run_optimization(user)
-        
-        return jsonify({"message": "Task updated successfully"})
+        try:
+            # Run the optimization pipeline
+            current_app.logger.info(f"Starting optimization for user {user_id} after task update")
+            handle_task_mutation(user_id)
+            current_app.logger.info("Optimization completed successfully")
+            
+            # Return updated scheduled tasks
+            return get_scheduled_tasks()
+        except Exception as opt_error:
+            # If optimization fails, we still updated the task successfully
+            # Log the error but return success to the user
+            current_app.logger.error(f"Optimization error: {str(opt_error)}")
+            current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+            
+            return jsonify({
+                "message": "Task updated successfully, but schedule optimization failed", 
+                "task_id": task.raw_task_id,
+                "title": task.title,
+                "optimization_error": str(opt_error)
+            })
     except Exception as e:
         db.session.rollback()
+        current_app.logger.error(f"Error updating task: {str(e)}")
+        current_app.logger.error(f"Stack trace: {traceback.format_exc()}") 
         return jsonify({"error": str(e)}), 500
 
 @tasks_bp.route("/api/tasks/<int:task_id>", methods=["DELETE"])
 def delete_task(task_id):
     user_id = session.get("user_id")
     if not user_id:
+        current_app.logger.error(f"Unauthorized: No user_id in session")
         return jsonify({"error": "Unauthorized"}), 401
 
+    current_app.logger.info(f"Starting delete for task ID: {task_id}, user_id: {user_id}")
+    
+    # Check if any task with this ID exists, regardless of user
+    current_app.logger.info(f"[DELETE] Checking for raw task with ID {task_id} in database")
+    any_task = RawTask.query.filter_by(raw_task_id=task_id).first()
+    if not any_task:
+        current_app.logger.error(f"Task with ID {task_id} does not exist in database")
+        return jsonify({"error": "Task not found in database"}), 404
+    
+    # Check if task belongs to current user
+    current_app.logger.info(f"[DELETE] Task found, checking if it belongs to user {user_id}")
     task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
     if not task:
-        return jsonify({"error": "Task not found"}), 404
+        current_app.logger.error(f"Task exists but belongs to user {any_task.user_id}, not {user_id}")
+        return jsonify({"error": "Task not found for current user"}), 404
 
+    current_app.logger.info(f"[DELETE] Found task with ID: {task_id} for deletion")
+    current_app.logger.info(f"[DELETE] Task to delete: Title='{task.title}', ID={task.raw_task_id}, User={task.user_id}")
+    
+    # Verify the task ID matches what was requested
+    if task.raw_task_id != task_id:
+        current_app.logger.error(f"[DELETE] ERROR: Task ID mismatch! Requested {task_id} but got {task.raw_task_id}")
+        return jsonify({"error": "Task ID mismatch"}), 500
+
+    # Delete both raw task and scheduled task
     try:
-        db.session.delete(task)
+        # Get task details for verification one more time before deletion
+        task_to_delete = RawTask.query.get(task_id)
+        current_app.logger.info(f"[DELETE] Final verification - Task to delete: ID={task_to_delete.raw_task_id}, Title='{task_to_delete.title}'")
+        
+        # First, directly delete any scheduled tasks linked to this raw task ID
+        # using a direct SQL-like query instead of ORM to avoid relationship issues
+        current_app.logger.info(f"[DELETE] Deleting scheduled tasks for raw_task_id: {task_id}")
+        
+        # Get scheduled tasks first for logging
+        scheduled_tasks = ScheduledTask.query.filter_by(raw_task_id=task_id).all()
+        for st in scheduled_tasks:
+            current_app.logger.info(f"[DELETE] Will delete scheduled task: ID={st.sched_task_id}, Title='{st.title}'")
+        
+        # Now delete them
+        deleted_count = ScheduledTask.query.filter_by(raw_task_id=task_id).delete(synchronize_session=False)
+        current_app.logger.info(f"[DELETE] Deleted {deleted_count} scheduled tasks")
+        
+        # Also delete any scheduled tasks that might be linked to this task through other means
+        # (defensive deletion to clean up any potential orphaned tasks)
+        deleted_extra = ScheduledTask.query.filter_by(user_id=user_id, title=task.title).delete(synchronize_session=False)
+        if deleted_extra > 0:
+            current_app.logger.info(f"[DELETE] Deleted {deleted_extra} additional scheduled tasks with matching title")
+        
+        # Then delete raw task - explicitly using the ID to ensure we're deleting the right task
+        current_app.logger.info(f"[DELETE] Deleting raw task with ID={task_id}, Title='{task.title}'")
+        RawTask.query.filter_by(raw_task_id=task_id).delete(synchronize_session=False)
+        current_app.logger.info(f"[DELETE] Raw task {task_id} deleted successfully")
         db.session.commit()
         
         # Re-run optimization to update the schedule
-        user = User.query.get(user_id)
-        run_optimization(user)
+        try:
+            current_app.logger.info(f"Starting optimization for user {user_id} after task deletion")
+            handle_task_mutation(user_id)
+            current_app.logger.info("Optimization completed successfully")
+        except Exception as opt_error:
+            # If optimization fails, we still deleted the task successfully
+            # Log the error but continue
+            current_app.logger.error(f"Optimization error after deletion: {str(opt_error)}")
+            current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
         
         return jsonify({"message": "Task deleted successfully"})
     except Exception as e:
         db.session.rollback()
+        current_app.logger.error(f"Error deleting task: {str(e)}")
+        current_app.logger.error(f"Stack trace: {traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
 @tasks_bp.route("/api/pending_tasks", methods=["GET"])
@@ -279,7 +394,7 @@ def complete_tasks():
 
         # Get user and run optimization for remaining tasks
         user = User.query.get(user_id)
-        run_optimization(user)
+        handle_task_mutation(user_id)
 
         # After optimization, restore the completed tasks
         for task_info in completed_tasks_info:

@@ -47,6 +47,8 @@ class RawTask(db.Model):
     duration = db.Column(db.Integer, nullable=True)  # Duration in minutes
     status = db.Column(db.Enum('not_completed', 'completed', name='task_status'), default='not_completed', nullable=False)
     imported_at = db.Column(db.DateTime, server_default=db.func.now())
+    is_location_flexible = db.Column(db.Boolean, default=False)
+    place_type = db.Column(db.String(100), nullable=True)
 
 
 # ---------- User Preferences ----------

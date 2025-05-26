@@ -6,8 +6,6 @@ from .extensions import db
 from .models import RawTask, ScheduledTask, Location, User, UserPreference
 from .maps_utils import build_distance_matrix, solve_tsp
 import requests
-from website.google_maps_helper import find_nearest_location
-from website.llm_utils import call_gemini_for_place_type, call_gemini_for_specific_business
 
 optimize_bp = Blueprint("optimize", __name__)
 
@@ -155,71 +153,6 @@ def reverse_geocode_osm(lat: float, lng: float) -> str | None:
 # → "Google Building 41, Amphitheatre Parkway, Mountain View, Santa Clara County, California, 94043, United States"
 
 
-def build_tasks_context(tasks):
-    lines = []
-    for t in tasks:
-        if getattr(t, 'is_location_flexible', False):
-            lines.append(f"- {t.title} (flexible location)")
-        else:
-            loc_str = t.location.address if getattr(t, 'location', None) else ''
-            time_str = t.start_time.strftime("%-I:%M %p") if getattr(t, 'start_time', None) else ''
-            lines.append(f"- {t.title} at {loc_str} ({time_str})")
-    return "\n".join(lines)
-
-def get_llm_location_preference(flexible_task, tasks_context, home_address):
-    prompt = f"""
-Here are my tasks for today:
-{tasks_context}
-
-For the task: '{flexible_task.title}', suggest a preferred area or store chain for efficiency, given the other tasks.
-Reply with just the area or store chain (e.g., 'Trader Joe's', 'Safeway', 'near 456 Oak Ave').
-"""
-    return call_gemini_for_specific_business(flexible_task.title, home_address)
-
-def assign_flexible_task_locations(tasks, user, home_address, api_key):
-    tasks_context = build_tasks_context(tasks)
-    for flex_task in [t for t in tasks if getattr(t, 'is_location_flexible', False)]:
-        area_or_chain = get_llm_location_preference(flex_task, tasks_context, home_address)
-        query = flex_task.location_query or flex_task.place_type
-        if area_or_chain and area_or_chain.lower() not in query.lower():
-            query = f"{area_or_chain} {query}"
-        # Find anchor (previous fixed task)
-        prev_fixed = None
-        for t in reversed(tasks[:tasks.index(flex_task)]):
-            if not getattr(t, 'is_location_flexible', False) and getattr(t, 'location_id', None) and getattr(t, 'location', None):
-                prev_fixed = t
-                break
-        if prev_fixed and prev_fixed.location:
-            anchor_lat, anchor_lng = prev_fixed.location.latitude, prev_fixed.location.longitude
-        else:
-            home_loc = user.user_preferences[0].home_location if user.user_preferences else None
-            if home_loc:
-                anchor_lat, anchor_lng = home_loc.latitude, home_loc.longitude
-            else:
-                anchor_lat = anchor_lng = None
-        if anchor_lat is not None and anchor_lng is not None:
-            place_data = find_nearest_location(
-                api_key=api_key,
-                query=query,
-                user_lat=anchor_lat,
-                user_lng=anchor_lng
-            )
-            if place_data:
-                location = Location.query.filter_by(
-                    latitude=place_data["lat"],
-                    longitude=place_data["lng"]
-                ).first()
-                if not location:
-                    location = Location(
-                        address=place_data["address"],
-                        latitude=place_data["lat"],
-                        longitude=place_data["lng"]
-                    )
-                    db.session.add(location)
-                    db.session.flush()
-                flex_task.location_id = location.location_id
-                db.session.commit()
-
 def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     """
     Run optimization for tasks based on different scenarios.
@@ -230,6 +163,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         current_lng: Current longitude (optional)
         sync_mode: If True, fetches fresh data from Todoist and Calendar
     """
+    print(f"[OPTIMIZE] Starting optimization for user: {user.user_id}")
     from .maps_utils import build_distance_matrix
     from .views.calendar import fetch_google_calendar_events
     from .views.todoist import parse_and_store_tasks
@@ -241,33 +175,19 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         db.session.commit()
 
     # Get tasks with locations
+    print(f"[OPTIMIZE] Querying tasks with locations for user: {user.user_id}")
     tasks_with_locations = (
         db.session.query(RawTask, Location)
         .outerjoin(Location, RawTask.location_id == Location.location_id)
         .filter(
-            RawTask.user_id == user.user_id,
+            RawTask.user_id == user.user_id,  
             RawTask.status == 'not_completed'  # Only optimize incomplete tasks
         )
         .order_by(RawTask.start_time)
         .all()
     )
-
-    # Build a list of RawTask objects for context
-    raw_tasks = [task for task, _ in tasks_with_locations]
-    api_key = current_app.config.get("GOOGLE_MAPS_API_KEY")
-    assign_flexible_task_locations(raw_tasks, user, home_address, api_key)
-
-    # Re-fetch tasks_with_locations after assignment
-    tasks_with_locations = (
-        db.session.query(RawTask, Location)
-        .outerjoin(Location, RawTask.location_id == Location.location_id)
-        .filter(
-            RawTask.user_id == user.user_id,
-            RawTask.status == 'not_completed'
-        )
-        .order_by(RawTask.start_time)
-        .all()
-    )
+    
+    print(f"[OPTIMIZE] Found {len(tasks_with_locations)} tasks with locations")
 
     if not tasks_with_locations:
         print("No tasks found.")
@@ -364,16 +284,21 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         print(f"{i}: {start_time}")
 
     # Clear existing scheduled tasks
-    ScheduledTask.query.filter_by(user_id=user.user_id).delete()
-    db.session.commit()
-
-    print("tasksloc")
-    print(tasks_with_locations)
+    print(f"[OPTIMIZE] Clearing scheduled tasks for user {user.user_id}")
+    deleted_count = ScheduledTask.query.filter_by(user_id=user.user_id).delete()
+    print(f"[OPTIMIZE] Deleted {deleted_count} existing scheduled tasks")
+    
+    # Define today's date for scheduling
     today = datetime.now().date()
+    print(f"[OPTIMIZE] Using today's date for scheduling: {today}")
 
-    # First, schedule fixed-time tasks (like calendar events)
+    # Preserve Google Calendar events in the schedule 
+    print(f"[OPTIMIZE] Preserving Google Calendar events in the schedule")
+    calendar_event_count = 0
+    calendar_count = 0
     for task, _ in tasks_with_locations:
         if task.source == 'google_calendar' and task.start_time and task.end_time:
+            calendar_event_count += 1
             sched = ScheduledTask(
                 user_id=user.user_id,
                 raw_task_id=task.raw_task_id,
@@ -387,8 +312,11 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 travel_eta_minutes=0
             )
             db.session.add(sched)
+            calendar_count += 1
 
     # Then schedule flexible tasks
+    print(f"[OPTIMIZE] Scheduling flexible tasks based on optimized route")
+    scheduled_count = 0
     for idx in route:
         # Skip start and end depots
         if idx == 0 or idx == len(locations)-1:
@@ -416,7 +344,8 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             travel_eta_minutes=0
         )
         db.session.add(sched)
+        scheduled_count += 1
 
     db.session.commit()
-    print("✅ Schedule optimized.")
+    print(f"[OPTIMIZE] ✅ Schedule optimized with {calendar_event_count} calendar events and {scheduled_count} optimized tasks")
     return True
