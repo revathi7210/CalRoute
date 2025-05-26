@@ -78,10 +78,16 @@ def create_task():
     location_id = None
     if data.get("location_name") or data.get("location_address"):
         location_str = data.get("location_name") or data.get("location_address")
-        # Get coordinates using geocoding
-        lat, lng = geocode_address(location_str)
-        if lat is None or lng is None:
-            return jsonify({"error": "Could not geocode the provided location"}), 400
+        
+        # If lat/lng are provided directly, use them
+        if data.get("lat") is not None and data.get("lng") is not None:
+            lat = data["lat"]
+            lng = data["lng"]
+        else:
+            # Try geocoding if API key is available
+            lat, lng = geocode_address(location_str)
+            if lat is None or lng is None:
+                return jsonify({"error": "Could not geocode the provided location and no coordinates provided"}), 400
 
         # Round coordinates to 3 decimal places (about 100m precision)
         lat = round(lat, 3)
@@ -194,70 +200,209 @@ def create_task():
 
 @tasks_bp.route("/api/tasks/<int:task_id>", methods=["PUT"])
 def update_task(task_id):
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
-    if not task:
-        return jsonify({"error": "Task not found"}), 404
-
-    data = request.json
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
-
-    # Update task fields
-    if "title" in data:
-        task.title = data["title"]
-    if "description" in data:
-        task.description = data["description"]
-    if "start_time" in data:
-        task.start_time = datetime.fromisoformat(data["start_time"]) if data["start_time"] else None
-    if "end_time" in data:
-        task.end_time = datetime.fromisoformat(data["end_time"]) if data["end_time"] else None
-    if "due_date" in data:
-        task.due_date = datetime.fromisoformat(data["due_date"]) if data["due_date"] else None
-    if "priority" in data:
-        task.priority = data["priority"]
-    if "duration" in data:
-        task.duration = data["duration"]
-    if "status" in data:
-        task.status = data["status"]
-
     try:
-        db.session.commit()
-        
-        # Re-run optimization to update the schedule
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+
+        # Get user first
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Unauthorized"}), 401
         user = User.query.get(user_id)
-        run_optimization(user)
-        
-        return jsonify({"message": "Task updated successfully"})
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Start a transaction
+        db.session.begin_nested()
+
+        # Get the task with its location relationship
+        task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
+        if not task:
+            db.session.rollback()
+            return jsonify({'error': 'Task not found'}), 404
+
+        # Update basic task fields
+        if 'title' in data:
+            task.title = data['title']
+        if 'description' in data:
+            task.description = data['description']
+        if 'priority' in data:
+            task.priority = data['priority']
+        if 'start_time' in data:
+            task.start_time = datetime.fromisoformat(data['start_time'].replace('Z', '+00:00'))
+        if 'end_time' in data:
+            task.end_time = datetime.fromisoformat(data['end_time'].replace('Z', '+00:00'))
+        if 'duration' in data:
+            task.duration = data['duration']
+
+        # Handle location update if provided
+        if any(key in data for key in ['location_name', 'location_address', 'lat', 'lng']):
+            location_name = data.get('location_name') or data.get('location_address')
+            lat = data.get('lat')
+            lng = data.get('lng')
+
+            if lat is not None and lng is not None:
+                # Round coordinates to 3 decimal places (about 100m precision)
+                lat = round(float(lat), 3)
+                lng = round(float(lng), 3)
+            elif location_name:
+                # Try to geocode the location
+                geocode_result = geocode_address(location_name)
+                if not geocode_result:
+                    db.session.rollback()
+                    return jsonify({'error': 'Could not geocode the provided location'}), 400
+                lat, lng = geocode_result
+                lat = round(lat, 3)
+                lng = round(lng, 3)
+            else:
+                db.session.rollback()
+                return jsonify({'error': 'Either coordinates or location name must be provided'}), 400
+
+            # Search for existing location by coordinates
+            existing_location = Location.query.filter(
+                db.func.abs(Location.latitude - lat) < 0.001,
+                db.func.abs(Location.longitude - lng) < 0.001
+            ).first()
+
+            if existing_location:
+                # Update existing location
+                existing_location.address = location_name
+                existing_location.latitude = lat
+                existing_location.longitude = lng
+                location = existing_location
+            else:
+                # Create new location
+                location = Location(
+                    address=location_name,
+                    latitude=lat,
+                    longitude=lng
+                )
+                db.session.add(location)
+                db.session.flush()  # Get the location ID
+
+            # Update task's location
+            task.location_id = location.location_id
+
+        # Commit the initial changes
+        db.session.commit()
+
+        # Run optimization to update the schedule
+        try:
+            # Delete all scheduled tasks for this user to ensure clean slate
+            ScheduledTask.query.filter_by(user_id=user_id).delete()
+            db.session.commit()
+
+            # Run optimization to create new scheduled tasks for all tasks
+            run_optimization(user)
+            db.session.commit()
+
+            # Verify that scheduled tasks were created
+            scheduled_tasks = ScheduledTask.query.filter_by(user_id=user_id).all()
+            if not scheduled_tasks:
+                current_app.logger.warning(f"No scheduled tasks created after optimization for user {user_id}")
+        except Exception as e:
+            current_app.logger.error(f"Error updating schedule: {str(e)}")
+            # Don't rollback the task update if optimization fails
+            pass
+
+        # Fetch the updated task with its location relationship
+        updated_task = (
+            RawTask.query
+            .filter_by(raw_task_id=task_id)
+            .join(Location, RawTask.location_id == Location.location_id)
+            .first()
+        )
+        if not updated_task:
+            return jsonify({'error': 'Failed to fetch updated task'}), 500
+
+        # Get the location data
+        location_data = None
+        if updated_task.location_id:
+            location = Location.query.get(updated_task.location_id)
+            if location:
+                location_data = {
+                    'address': location.address,
+                    'latitude': location.latitude,
+                    'longitude': location.longitude
+                }
+
+        # Get the scheduled task data
+        scheduled_task = ScheduledTask.query.filter_by(raw_task_id=updated_task.raw_task_id).first()
+        scheduled_data = None
+        if scheduled_task:
+            scheduled_data = {
+                'scheduled_start_time': scheduled_task.scheduled_start_time.strftime("%-I:%M %p") if scheduled_task.scheduled_start_time else None,
+                'scheduled_end_time': scheduled_task.scheduled_end_time.strftime("%-I:%M %p") if scheduled_task.scheduled_end_time else None
+            }
+
+        return jsonify({
+            'message': 'Task updated successfully',
+            'task': {
+                'id': updated_task.raw_task_id,
+                'title': updated_task.title,
+                'description': updated_task.description,
+                'location': location_data['address'] if location_data else None,
+                'lat': location_data['latitude'] if location_data else None,
+                'lng': location_data['longitude'] if location_data else None,
+                'priority': updated_task.priority,
+                'start_time': scheduled_data['scheduled_start_time'] if scheduled_data else None,
+                'end_time': scheduled_data['scheduled_end_time'] if scheduled_data else None,
+                'duration': updated_task.duration,
+                'raw_task_id': updated_task.raw_task_id
+            }
+        })
+
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        current_app.logger.error(f"Error updating task: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@tasks_bp.route("/api/tasks/<int:task_id>", methods=["DELETE"])
-def delete_task(task_id):
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
-    if not task:
-        return jsonify({"error": "Task not found"}), 404
-
+@tasks_bp.route("/api/tasks/<int:raw_task_id>", methods=["DELETE"])
+def delete_task(raw_task_id):
     try:
+        user_id = session.get("user_id")
+        if not user_id:
+            current_app.logger.error("Delete task failed: Unauthorized - no user_id in session")
+            return jsonify({"error": "Unauthorized"}), 401
+
+        # Log the attempt to delete
+        current_app.logger.info(f"Attempting to delete raw task {raw_task_id} for user {user_id}")
+
+        # First check if the task exists and belongs to the user
+        task = RawTask.query.filter_by(raw_task_id=raw_task_id, user_id=user_id).first()
+        if not task:
+            current_app.logger.warning(f"Delete task failed: Raw task {raw_task_id} not found for user {user_id}")
+            return jsonify({"error": "Task not found"}), 404
+
+        # Also delete any associated scheduled task
+        scheduled_task = ScheduledTask.query.filter_by(raw_task_id=raw_task_id).first()
+        if scheduled_task:
+            current_app.logger.info(f"Deleting associated scheduled task {scheduled_task.sched_task_id}")
+            db.session.delete(scheduled_task)
+
+        # Delete the raw task
+        current_app.logger.info(f"Deleting raw task {raw_task_id}")
         db.session.delete(task)
         db.session.commit()
         
         # Re-run optimization to update the schedule
         user = User.query.get(user_id)
+        if not user:
+            current_app.logger.error(f"Delete task failed: User {user_id} not found after deletion")
+            return jsonify({"error": "User not found"}), 404
+
+        current_app.logger.info(f"Running optimization after task deletion")
         run_optimization(user)
+        db.session.commit()
         
+        current_app.logger.info(f"Successfully deleted raw task {raw_task_id} and updated schedule")
         return jsonify({"message": "Task deleted successfully"})
+
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        current_app.logger.error(f"Delete task failed with error: {str(e)}")
+        return jsonify({"error": f"Failed to delete task: {str(e)}"}), 500
 
 @tasks_bp.route("/api/pending_tasks", methods=["GET"])
 def get_pending_tasks():
