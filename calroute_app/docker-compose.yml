@@ -13,8 +13,11 @@ services:
       - DB_HOST=db
       - DB_PORT=3306  
       - PYTHONPATH=/app
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       - db
+      - redis
     env_file:
       - .env
 
@@ -32,5 +35,14 @@ services:
     ports:
       - "3307:3306"
 
+  redis:
+    image: redis:7.0-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
 volumes:
   db_data:
+  redis_data:

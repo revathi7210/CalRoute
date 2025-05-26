@@ -32,18 +32,18 @@ def get_scheduled_tasks():
             current_app.logger.error(f"Task scheduling failed: {e}")
             return jsonify({"error": "Task scheduling failed"}), 500
 
-    #  Get scheduled tasks + join with location
+    #  Get scheduled tasks + join with location and raw task
     results = (
-        db.session.query(ScheduledTask, Location)
+        db.session.query(ScheduledTask, Location, RawTask)
         .join(Location, ScheduledTask.location_id == Location.location_id)
+        .join(RawTask, ScheduledTask.raw_task_id == RawTask.raw_task_id)
         .filter(ScheduledTask.user_id == user_id)
         .order_by(ScheduledTask.scheduled_start_time)
         .all()
     )
-    print(results)
 
     tasks = []
-    for sched_task, location in results:
+    for sched_task, location, raw_task in results:
         if not location:
             continue
         tasks.append({
@@ -59,7 +59,7 @@ def get_scheduled_tasks():
             "description": getattr(sched_task, 'description', ''),
             "priority": getattr(sched_task, 'priority', 1),
             "transit_mode": getattr(sched_task, 'transit_mode', None),
-            "is_completed": getattr(sched_task, 'is_completed', False),
+            "is_completed": raw_task.status == "completed",
         })
 
     return jsonify({"tasks": tasks})
@@ -246,33 +246,15 @@ def complete_tasks():
     task_ids = data["task_ids"]
     
     try:
-        # First, get all tasks that will be completed
-        tasks_to_complete = (
-            db.session.query(ScheduledTask, RawTask)
-            .join(RawTask, ScheduledTask.raw_task_id == RawTask.raw_task_id)
-            .filter(
-                and_(
-                    ScheduledTask.sched_task_id.in_(task_ids),
-                    ScheduledTask.user_id == user_id
-                )
+        # Get and update raw tasks
+        raw_tasks = RawTask.query.filter(
+            and_(
+                RawTask.raw_task_id.in_(task_ids),
+                RawTask.user_id == user_id
             )
-            .all()
-        )
+        ).all()
 
-        # Store the completed tasks' information
-        completed_tasks_info = []
-        for sched_task, raw_task in tasks_to_complete:
-            completed_tasks_info.append({
-                'sched_task_id': sched_task.sched_task_id,
-                'raw_task_id': sched_task.raw_task_id,
-                'title': sched_task.title,
-                'description': sched_task.description,
-                'location_id': sched_task.location_id,
-                'scheduled_start_time': sched_task.scheduled_start_time,
-                'scheduled_end_time': sched_task.scheduled_end_time,
-                'priority': sched_task.priority,
-                'travel_eta_minutes': sched_task.travel_eta_minutes
-            })
+        for raw_task in raw_tasks:
             raw_task.status = "completed"
 
         db.session.commit()
@@ -281,32 +263,45 @@ def complete_tasks():
         user = User.query.get(user_id)
         run_optimization(user)
 
-        # After optimization, restore the completed tasks
-        for task_info in completed_tasks_info:
-            # Check if the task still exists (it might have been deleted during optimization)
-            existing_task = ScheduledTask.query.get(task_info['sched_task_id'])
-            if not existing_task:
-                # If task was deleted, recreate it with the same information
-                new_task = ScheduledTask(
-                    sched_task_id=task_info['sched_task_id'],
-                    user_id=user_id,
-                    raw_task_id=task_info['raw_task_id'],
-                    title=task_info['title'],
-                    description=task_info['description'],
-                    location_id=task_info['location_id'],
-                    scheduled_start_time=task_info['scheduled_start_time'],
-                    scheduled_end_time=task_info['scheduled_end_time'],
-                    priority=task_info['priority'],
-                    travel_eta_minutes=task_info['travel_eta_minutes']
-                )
-                db.session.add(new_task)
-
-        db.session.commit()
-
-        # Return success message - frontend will handle fetching updated tasks
         return jsonify({"message": "Tasks completed successfully"})
 
     except Exception as e:
         db.session.rollback()
         current_app.logger.error(f"Failed to complete tasks: {e}")
         return jsonify({"error": "Failed to complete tasks"}), 500
+
+@tasks_bp.route("/api/complete_task/<int:task_id>", methods=["POST"])
+def complete_single_task(task_id):
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        # Get and update the single raw task
+        raw_task = RawTask.query.filter(
+            and_(
+                RawTask.raw_task_id == task_id,
+                RawTask.user_id == user_id
+            )
+        ).first()
+
+        if not raw_task:
+            return jsonify({"error": "Task not found"}), 404
+
+        raw_task.status = "completed"
+        db.session.commit()
+
+        # Get user and run optimization for remaining tasks
+        user = User.query.get(user_id)
+        run_optimization(user)
+
+        return jsonify({
+            "message": "Task completed successfully",
+            "task_id": task_id,
+            "status": "completed"
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Failed to complete task: {e}")
+        return jsonify({"error": "Failed to complete task"}), 500

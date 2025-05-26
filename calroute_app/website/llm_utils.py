@@ -1,8 +1,8 @@
 import google.generativeai as genai
-from flask import current_app
 from flask import current_app, session
-from .models import UserPreference, Location
+from .models import UserPreference, Location, user_favorite_stores
 import googlemaps
+from website.extensions import db
 
 
 # Valid Google Places types
@@ -108,3 +108,43 @@ def get_nearest_location_from_maps(home_address, task_text):
     else:
         # Step 2: Fallback — Ask Gemini for a specific business name
         return call_gemini_for_specific_business(task_text, home_address)
+
+def get_user_preferred_locations(user_id: int) -> dict:
+    """
+    Returns the user’s preferred gym address and a list of favorite grocery store addresses.
+    """
+    pref = UserPreference.query.filter_by(user_id=user_id).first()
+    if not pref:
+        return {'gym': None, 'grocery_stores': []}
+
+    result = {'gym': None, 'grocery_stores': []}
+
+    # Get gym location
+    if pref.gym_location_id:
+        gym_loc = Location.query.get(pref.gym_location_id)
+        if gym_loc:
+            result['gym'] = {
+                'location_id': gym_loc.location_id,
+                'address': gym_loc.address,
+                'latitude': gym_loc.latitude,
+                'longitude': gym_loc.longitude
+            }
+
+    # Get favorite grocery stores
+    favorite_stores = db.session.query(Location).join(
+        user_favorite_stores,
+        Location.location_id == user_favorite_stores.c.location_id
+    ).filter(
+        user_favorite_stores.c.pref_id == pref.pref_id
+    ).all()
+
+    result['grocery_stores'] = [{
+        'location_id': store.location_id,
+        'address': store.address,
+        'latitude': store.latitude,
+        'longitude': store.longitude
+    } for store in favorite_stores]
+
+    return result
+
+
