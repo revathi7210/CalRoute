@@ -81,21 +81,30 @@ def get_preferences():
             'travel_mode': 'car',
             'prioritization_style': 'balanced',
             'home_address': None,
-            'favorite_store_address': None
+            'favorite_stores': [],
+            'transit_modes': []
         })
 
     # Get location addresses if they exist
     home_location = Location.query.get(pref.home_location_id) if pref.home_location_id else None
-    fav_store_location = Location.query.get(pref.favorite_store_location_id) if pref.favorite_store_location_id else None
+    gym_location = Location.query.get(pref.gym_location_id) if pref.gym_location_id else None
+    
+    # Get favorite store addresses from the many-to-many relationship
+    favorite_stores = [store.address for store in pref.favorite_store_locations]
+    
+    # Get transit modes from the many-to-many relationship
+    transit_modes = [mode.mode for mode in pref.transit_modes]
 
     return jsonify({
         'max_daily_hours': pref.max_daily_hours,
         'work_start_time': pref.work_start_time.strftime('%H:%M') if pref.work_start_time else None,
         'work_end_time': pref.work_end_time.strftime('%H:%M') if pref.work_end_time else None,
-        'travel_mode': pref.travel_mode,
+        'travel_mode': pref.travel_mode if hasattr(pref, 'travel_mode') else 'car',
         'prioritization_style': pref.prioritization_style,
         'home_address': home_location.address if home_location else None,
-        'favorite_store_address': fav_store_location.address if fav_store_location else None
+        'gym_address': gym_location.address if gym_location else None,
+        'favorite_stores': favorite_stores,
+        'transit_modes': transit_modes
     })
 
 @preferences_bp.route("/preferences", methods=["POST"])
