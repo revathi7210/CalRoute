@@ -25,12 +25,24 @@ def get_scheduled_tasks():
         try:
             fetch_google_calendar_events(user)
             parse_and_store_tasks(user)
-            run_optimization(user)
+            
+            # Capture detailed optimization error
+            try:
+                success = run_optimization(user)
+                if not success:
+                    current_app.logger.error("Optimization returned False - no feasible solution found")
+                    return jsonify({"error": "Could not find a feasible schedule"}), 500
+            except Exception as optim_err:
+                current_app.logger.error(f"Detailed optimization error: {str(optim_err)}")
+                import traceback
+                current_app.logger.error(f"Optimization traceback: {traceback.format_exc()}")
+                return jsonify({"error": f"Optimization failed: {str(optim_err)}"}), 500
+                
             db.session.commit()
         except Exception as e:
             db.session.rollback()
             current_app.logger.error(f"Task scheduling failed: {e}")
-            return jsonify({"error": "Task scheduling failed"}), 500
+            return jsonify({"error": f"Task scheduling failed: {str(e)}"}), 500
 
     #  Get scheduled tasks + join with location and raw task
     results = (
