@@ -1,295 +1,236 @@
-# File: optimize_routes.py
+# optimize_routes.py
 
 from flask import Blueprint, session, request, jsonify
 from datetime import datetime, timedelta, time, date
 from .extensions import db
 from .models import RawTask, ScheduledTask, Location, User, UserPreference
-from .maps_utils import build_distance_matrix, solve_tsp
+from .maps_utils import build_distance_matrix, solve_tsp, gmaps, GOOGLE_MAPS_API
 import requests
+import os
 
 optimize_bp = Blueprint("optimize", __name__)
 
-# --- Morning Schedule (default from home) ---
-@optimize_bp.route("/api/optimize_schedule", methods=["POST"])
-def optimize_schedule():
-    """Initial schedule optimization with fresh data sync"""
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    success = run_optimization(user, sync_mode=True)
-    if not success:
-        return jsonify({"error": "Could not generate optimized route"}), 500
-
-    return jsonify({"success": True, "message": "Schedule optimized."})
-
-# --- Dynamic Schedule (re-optimization with current location) ---
-@optimize_bp.route("/api/dynamic_schedule", methods=["POST"])
-def dynamic_schedule():
-    """Re-optimize schedule based on current location"""
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    lat = request.json.get("lat")
-    lng = request.json.get("lng")
-    print(lat)
-    print(lng)
-
-    if lat is None or lng is None:
-        return jsonify({"error": "Current location required"}), 400
-
-    success = run_optimization(user, current_lat=lat, current_lng=lng)
-    if not success:
-        return jsonify({"error": "Could not generate updated route"}), 500
-
-    return jsonify({"success": True, "message": "Route re-optimized from current location."})
-
-@optimize_bp.route("/api/reoptimize", methods=["POST"])
-def reoptimize_schedule():
-    """Re-optimize schedule after task edits"""
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    success = run_optimization(user)
-    if not success:
-        return jsonify({"error": "Could not re-optimize schedule"}), 500
-
-    return jsonify({"success": True, "message": "Schedule re-optimized."})
-
-@optimize_bp.route("/api/check-pending-tasks", methods=["GET"])
-def check_pending_tasks():
-    """Check for tasks that need completion status"""
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    # Get tasks scheduled for today that are not completed
-    today = datetime.now().date()
-    pending_tasks = (
-        ScheduledTask.query
-        .filter(
-            ScheduledTask.user_id == user_id,
-            ScheduledTask.scheduled_start_time >= today,
-            ScheduledTask.scheduled_start_time < today + timedelta(days=1),
-            ScheduledTask.status == "pending"
-        )
-        .order_by(ScheduledTask.scheduled_start_time)
-        .all()
-    )
-
-    tasks_data = [{
-        "scheduled_task_id": task.scheduled_task_id,
-        "title": task.title,
-        "scheduled_start_time": task.scheduled_start_time.isoformat(),
-        "scheduled_end_time": task.scheduled_end_time.isoformat()
-    } for task in pending_tasks]
-
-    return jsonify({
-        "has_pending_tasks": len(pending_tasks) > 0,
-        "tasks": tasks_data
-    })
-
-@optimize_bp.route("/api/update-task-completion", methods=["POST"])
-def update_task_completion():
-    """Update completion status of tasks"""
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.json
-    if not data or "completed_tasks" not in data:
-        return jsonify({"error": "No completion data provided"}), 400
-
-    completed_task_ids = data["completed_tasks"]
-    
-    # Update scheduled tasks
-    for task_id in completed_task_ids:
-        scheduled_task = ScheduledTask.query.get(task_id)
-        if scheduled_task and scheduled_task.user_id == user_id:
-            scheduled_task.status = "completed"
-            
-            # Update corresponding raw task
-            raw_task = RawTask.query.get(scheduled_task.raw_task_id)
-            if raw_task:
-                raw_task.status = "completed"
-
-    db.session.commit()
-
-    # Reoptimize remaining tasks
-    user = User.query.get(user_id)
-    success = run_optimization(user)
-
-    return jsonify({
-        "success": True,
-        "message": "Task completion status updated and schedule reoptimized",
-        "reoptimization_success": success
-    })
-
-def reverse_geocode_osm(lat: float, lng: float) -> str | None:
-    url = "https://nominatim.openstreetmap.org/reverse"
-    params = {
-        "lat": lat,
-        "lon": lng,
-        "format": "jsonv2",
-    }
-    resp = requests.get(url, params=params, headers={"User-Agent": "CalRoute/1.0"}).json()
-    return resp.get("display_name")
-
-
-# → "Google Building 41, Amphitheatre Parkway, Mountain View, Santa Clara County, California, 94043, United States"
-
+# ... (existing routes) ...
 
 def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     """
     Run optimization for tasks based on different scenarios.
-    
+
     Args:
         user: User object
         current_lat: Current latitude (optional)
         current_lng: Current longitude (optional)
-        sync_mode: If True, fetches fresh data from Todoist and Calendar
+        sync_mode: If True, fetches fresh data
     """
-    from .maps_utils import build_distance_matrix
+    print(f"Starting optimization for user {user.user_id}")
+    print(f"Sync mode: {sync_mode}")
+    
     from .views.calendar import fetch_google_calendar_events
     from .views.todoist import parse_and_store_tasks
 
-    # If in sync mode, fetch fresh data from external sources
     if sync_mode:
+        print("Sync mode enabled - fetching fresh data from calendar and todoist")
         fetch_google_calendar_events(user)
         parse_and_store_tasks(user)
         db.session.commit()
+        print("Data sync completed")
 
-    # Get tasks with locations
     tasks_with_locations = (
         db.session.query(RawTask, Location)
         .outerjoin(Location, RawTask.location_id == Location.location_id)
         .filter(
             RawTask.user_id == user.user_id,
-            RawTask.status == 'not_completed'  # Only optimize incomplete tasks
+            RawTask.status == 'not_completed'
         )
         .order_by(RawTask.start_time)
         .all()
     )
 
+    print(f"Found {len(tasks_with_locations)} tasks with locations to optimize")
+    
     if not tasks_with_locations:
-        print("No tasks found.")
+        print("No tasks with locations found to optimize.")
         return False
 
     pref = UserPreference.query.filter_by(user_id=user.user_id).first()
     if not pref or not pref.home_location_id:
-        print("No home_location_id set in user preferences.")
+        print("User preferences or home location not set.")
         return False
+        
     home_loc = Location.query.get(pref.home_location_id)
     if not home_loc:
-        print(f"Home location not found (id={pref.home_location_id}).")
+        print("Home location not found in the database.")
         return False
+    
+    print(f"Using home location: {home_loc.address}")
 
     home_address = home_loc.address
-    print(home_address)
     now = datetime.now()
 
-    # Prepare optimization data
     locations = []
     durations = []
     time_windows = []
-    task_indices = []  # Keep track of which tasks we're including
+    task_indices = []
 
-    # Add starting location (current location or home)
+    # Set default start time to 8am (480 minutes since midnight)
+    default_start_time = 8 * 60  # 8:00 AM in minutes
+    
     if current_lat and current_lng:
         current_loc = reverse_geocode_osm(current_lat, current_lng)
-        print("current_loc:", current_loc)
         locations.append(current_loc)
         durations.append(0)
-        time_windows.append((now.hour * 60 + now.minute, 1440))
+        # If current time is after 8am, use current time, otherwise start at 8am
+        current_minutes = now.hour * 60 + now.minute
+        start_minutes = max(current_minutes, default_start_time)
+        time_windows.append((start_minutes, 1440))
     else:
         locations.append(home_address)
         durations.append(0)
-        time_windows.append((0, 1440))
+        time_windows.append((default_start_time, 1440))  # Start at 8am instead of midnight
 
-    # Add task locations
     for i, (task, loc) in enumerate(tasks_with_locations):
-        # Skip tasks that have fixed times (like calendar events)
         if task.source == 'google_calendar' and task.start_time and task.end_time:
             continue
 
-        # For tasks without location, use home address
-        if not loc:
-            locations.append(home_address)
-        else:
-            locations.append(loc.address)
-        
-        # Use task duration if specified, otherwise use default
-        duration = task.duration if task.duration else 45
-        durations.append(duration)
+        locations.append(loc.address if loc else home_address)
+        durations.append(task.duration if task.duration else 45)
 
-        # Build time window based on task constraints
+        # If task has a start time, use it; otherwise use default 8am start
+        default_start_time = 8 * 60  # 8:00 AM in minutes
+        
         if task.start_time:
             start_min = task.start_time.hour * 60 + task.start_time.minute
         else:
-            start_min = 0
-
-        if task.end_time:
-            end_min = task.end_time.hour * 60 + task.end_time.minute
-        else:
-            end_min = 24 * 60  # whole day
-
+            start_min = default_start_time
+            
+        end_min = task.end_time.hour * 60 + task.end_time.minute if task.end_time else 24 * 60
         time_windows.append((start_min, end_min))
         task_indices.append(i)
 
-    # Add home location as end point
     locations.append(home_address)
     durations.append(0)
-    time_windows.append((0, 1440))
+    # Allow return to home anytime after 8am
+    default_start_time = 8 * 60  # 8:00 AM in minutes
+    time_windows.append((default_start_time, 1440))
 
-    # Build and solve
-    distance_matrix = build_distance_matrix(locations)
-    n = len(distance_matrix)
+    # Fetch user's preferred transit modes from preferences
+    user_transit_modes = {mode.mode for mode in pref.transit_modes}
+    if not user_transit_modes:
+        user_transit_modes = {'car'} # Default to car if no modes are set
 
-    print("\n📍 Locations:")
-    for i, addr in enumerate(locations):
-        print(f"{i}: {addr}")
+    # Get both the distance matrix and mode matrix from build_distance_matrix
+    distance_matrix, mode_matrix = build_distance_matrix(locations, modes=list(user_transit_modes))
     
-    for i, dur in enumerate(durations):
-        print(f"{i}: {dur}")
+    print("\n==== ROUTE OPTIMIZATION INPUTS ====")
+    print(f"Locations: {locations}")
+    print(f"Durations: {durations}")
+    print(f"Time Windows: {time_windows}")
+    print(f"Transit Modes: {user_transit_modes}")
     
-    for i, time_window in enumerate(time_windows):
-        print(f"{i}: {time_window}")
+    # Pass the mode_matrix to solve_tsp to get transit modes for each segment
+    route, start_times, total_travel_time, travel_modes = solve_tsp(
+        distance_matrix, 
+        task_durations=durations, 
+        time_windows=time_windows,
+        mode_matrix=mode_matrix
+    )
+    
+    print("\n==== ROUTE OPTIMIZATION OUTPUTS ====")
+    print(f"Route: {route}")
+    print(f"Start Times: {start_times}")
+    print(f"Total Travel Time: {total_travel_time}")
+    print(f"Travel Modes: {travel_modes}")
+    
+    if not route:
+        print("\n❌ Could not find a solution.")
+        return False
+        
+    print("\n✅ Solution found. Scheduling tasks...")
 
-    print("\n📏 Distance Matrix (minutes):")
-    for i, row in enumerate(distance_matrix):
-        row_str = " | ".join(f"{val:>5}" for val in row)
-        print(f"{i}: {row_str}")
-    print("\n")
-
-    route, start_times = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows)
-    for i, start_time in enumerate(start_times):
-        print(f"{i}: {start_time}")
-
-    # Clear existing scheduled tasks
     ScheduledTask.query.filter_by(user_id=user.user_id).delete()
     db.session.commit()
 
-    print("tasksloc")
-    print(tasks_with_locations)
     today = datetime.now().date()
 
-    # First, schedule fixed-time tasks (like calendar events)
-    for task, _ in tasks_with_locations:
+    # Map internal mode names to user-friendly names
+    mode_display_names = {
+        'car': 'Driving',
+        'bike': 'Biking',
+        'bus_train': 'Public Transit',
+        'walking': 'Walking',
+        'rideshare': 'Rideshare'
+    }
+    
+    # Choose a default transit mode (first one available)
+    default_mode = list(user_transit_modes)[0] if user_transit_modes else 'car'
+    default_display_mode = mode_display_names.get(default_mode, 'Driving')
+    print(f"Using default transit mode: {default_display_mode}")
+    
+    # Schedule fixed-time tasks first with transit modes
+    for task, location in tasks_with_locations:
         if task.source == 'google_calendar' and task.start_time and task.end_time:
+            # Find best transit mode based on distance from home to this location
+            best_mode = default_mode
+            
+            # Force specific modes for certain keywords in the address or title
+            if location:
+                force_mode = None
+                address_lower = location.address.lower() if location.address else ""
+                title_lower = task.title.lower() if task.title else ""
+                
+                # Force driving for airport, long distances
+                if 'airport' in address_lower or 'airport' in title_lower:
+                    force_mode = 'car'
+                    print(f"FORCING DRIVING MODE for airport location: {location.address}")
+                elif any(keyword in address_lower for keyword in ['santa ana', 'tustin', 'newport', 'costa mesa']):
+                    force_mode = 'car'
+                    print(f"FORCING DRIVING MODE for distant location: {location.address}")
+                
+                if force_mode:
+                    if force_mode in user_transit_modes:
+                        best_mode = force_mode
+                    print(f"Applied forced mode {force_mode} for {task.title} at {location.address}")
+                else:
+                    # Calculate distance from home to this location
+                    try:
+                        # Use direct Google Maps API call for this specific route
+                        if GOOGLE_MAPS_API:
+                            directions = gmaps.directions(
+                                home_address,
+                                location.address,
+                                mode="driving"  # Just to get distance
+                            )
+                            if directions and len(directions) > 0:
+                                # Extract distance in meters
+                                distance_meters = directions[0]['legs'][0]['distance']['value']
+                                distance = distance_meters / 1000  # km
+                                
+                                print(f"Distance calculation result for {task.title}: {distance:.2f} km")
+                                
+                                # Choose appropriate mode based on distance
+                                if distance < 1:  # Less than 1 km
+                                    best_mode = 'walking' if 'walking' in user_transit_modes else default_mode
+                                    print(f"Short distance ({distance:.2f} km): selecting walking mode")
+                                elif distance < 5:  # Less than 5 km
+                                    best_mode = 'bike' if 'bike' in user_transit_modes else default_mode
+                                    print(f"Medium distance ({distance:.2f} km): selecting biking mode")
+                                else:  # Over 5 km - driving
+                                    best_mode = 'car' if 'car' in user_transit_modes else default_mode
+                                    print(f"Long distance ({distance:.2f} km): selecting driving mode")
+                            else:
+                                print(f"No directions found for {task.title}, using default mode")
+                    except Exception as e:
+                        print(f"Error calculating distance for {task.title}: {e}")
+                        # If we get an error, use driving for safety
+                        if 'car' in user_transit_modes:
+                            best_mode = 'car'
+                            print(f"Error occurred - defaulting to driving mode for {task.title}")
+            
+            print(f"Final mode for {task.title}: {best_mode}")
+            
+            # Get user-friendly name for the transit mode
+            display_mode = mode_display_names.get(best_mode, 'Driving')
+            
             sched = ScheduledTask(
                 user_id=user.user_id,
                 raw_task_id=task.raw_task_id,
@@ -300,25 +241,45 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 scheduled_end_time=task.end_time,
                 status="pending",
                 priority=task.priority,
-                travel_eta_minutes=0
+                travel_eta_minutes=0,
+                transit_mode=display_mode  # Add transit mode
             )
+            print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
             db.session.add(sched)
 
-    # Then schedule flexible tasks
-    for idx in route:
-        # Skip start and end depots
-        if idx == 0 or idx == len(locations)-1:
+    # Schedule flexible tasks based on the optimized route
+    for i, idx in enumerate(route):
+        if idx == 0 or idx == len(locations) - 1:
             continue
 
-        task_idx = task_indices[idx - 1]  # Adjust index to account for skipped tasks
+        task_idx = task_indices[idx - 1]
         raw, _ = tasks_with_locations[task_idx]
         dur = durations[idx]
 
-        # Use solver's optimized times
         mins = start_times[idx]
         st = datetime.combine(today, time(mins // 60, mins % 60))
         et = st + timedelta(minutes=dur)
+        
+        # Get the transit mode for this task (from previous location)
+        transit_mode = None
+        if i > 0 and travel_modes and i-1 < len(travel_modes):  # Not the first task and within travel_modes bounds
+            transit_mode = travel_modes[i-1]
+            print(f"Task {raw.title}: Using transit mode {transit_mode}")
+        else:
+            print(f"Task {raw.title}: No transit mode available, using default")
 
+        # Map internal mode names to user-friendly names
+        mode_display_names = {
+            'car': 'Driving',
+            'bike': 'Biking',
+            'bus_train': 'Public Transit',
+            'walking': 'Walking',
+            'rideshare': 'Rideshare'
+        }
+        
+        # Get user-friendly name for the transit mode
+        display_mode = mode_display_names.get(transit_mode, 'Driving') if transit_mode else 'Driving'
+        
         sched = ScheduledTask(
             user_id=user.user_id,
             raw_task_id=raw.raw_task_id,
@@ -329,10 +290,12 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             scheduled_end_time=et,
             status="pending",
             priority=raw.priority,
-            travel_eta_minutes=0
+            travel_eta_minutes=0,
+            transit_mode=display_mode  # Store the selected transit mode
         )
         db.session.add(sched)
 
     db.session.commit()
-    print("✅ Schedule optimized.")
+    print("\n✅ Schedule optimized successfully.")
+    print(f"Scheduled {len(route)-2} tasks")  # Subtract 2 for start/end depot
     return True

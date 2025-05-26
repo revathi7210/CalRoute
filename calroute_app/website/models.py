@@ -129,4 +129,5 @@ class ScheduledTask(db.Model):
     status = db.Column(db.Enum('pending', 'completed', 'cancelled', name='task_status'), default='pending')
     priority = db.Column(db.Integer, default=3)
     travel_eta_minutes = db.Column(db.Float)
+    transit_mode = db.Column(db.String(20), nullable=True)  # Store the selected transit mode
     created_at = db.Column(db.DateTime, server_default=db.func.now())
