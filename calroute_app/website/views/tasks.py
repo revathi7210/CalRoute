@@ -4,7 +4,7 @@ from website.models import User, ScheduledTask, Location, RawTask
 from website.views.calendar import fetch_google_calendar_events
 from website.views.todoist import parse_and_store_tasks
 from website.optimize_routes import run_optimization
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import and_
 from website.google_maps_helper import geocode_address
 
@@ -83,8 +83,20 @@ def create_task():
         if lat is None or lng is None:
             return jsonify({"error": "Could not geocode the provided location"}), 400
 
-        # Check if location already exists
-        location = Location.query.filter_by(latitude=lat, longitude=lng).first()
+        # Round coordinates to 3 decimal places (about 100m precision)
+        lat = round(lat, 3)
+        lng = round(lng, 3)
+
+        # First try to find location by exact address match
+        location = Location.query.filter_by(address=location_str).first()
+        
+        # If no exact address match, try finding by coordinates
+        if not location:
+            location = Location.query.filter(
+                db.func.abs(Location.latitude - lat) < 0.001,
+                db.func.abs(Location.longitude - lng) < 0.001
+            ).first()
+        
         if not location:
             location = Location(
                 address=location_str,
@@ -96,22 +108,57 @@ def create_task():
         location_id = location.location_id
 
     # Create a new raw task
-    raw_task = RawTask(
-        user_id=user_id,
-        source="manual",
-        external_id=f"manual-{datetime.now().timestamp()}",
-        title=data.get("title"),
-        description=data.get("description"),
-        start_time=datetime.fromisoformat(data.get("start_time")) if data.get("start_time") else None,
-        end_time=datetime.fromisoformat(data.get("end_time")) if data.get("end_time") else None,
-        due_date=datetime.fromisoformat(data.get("due_date")) if data.get("due_date") else None,
-        priority=data.get("priority", 3),
-        duration=data.get("duration", 45),  # Default 45 minutes if not specified
-        status=data.get("status", "not_completed"),  # Default status if not specified
-        location_id=location_id  # Add the location_id to the raw task
-    )
-
     try:
+        # Parse and validate times
+        start_time = None
+        end_time = None
+        if data.get("start_time"):
+            start_time = datetime.fromisoformat(data["start_time"])
+            if start_time.tzinfo is None:
+                start_time = start_time.replace(tzinfo=timezone.utc)
+            # Ensure start time is today (UTC)
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow = today.replace(day=today.day + 1)
+            if not (today <= start_time < tomorrow):
+                return jsonify({"error": "Start time must be for today"}), 400
+            
+            # Ensure start time is in the future
+            now = datetime.now(timezone.utc)
+            if start_time.hour * 60 + start_time.minute <= now.hour * 60 + now.minute and start_time.date() == now.date():
+                return jsonify({"error": "Start time must be after current time"}), 400
+
+        if data.get("end_time"):
+            end_time = datetime.fromisoformat(data["end_time"])
+            if end_time.tzinfo is None:
+                end_time = end_time.replace(tzinfo=timezone.utc)
+            # Ensure end time is today (UTC)
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow = today.replace(day=today.day + 1)
+            if not (today <= end_time < tomorrow):
+                return jsonify({"error": "End time must be for today"}), 400
+            
+            # Ensure end time is after start time
+            if start_time and (end_time.hour * 60 + end_time.minute <= start_time.hour * 60 + start_time.minute):
+                return jsonify({"error": "End time must be after start time"}), 400
+
+        # Log the times for debugging
+        current_app.logger.info(f"Creating task with times: current={datetime.now(timezone.utc)}, start={start_time}, end={end_time}")
+
+        raw_task = RawTask(
+            user_id=user_id,
+            source="manual",
+            external_id=f"manual-{datetime.now().timestamp()}",
+            title=data.get("title"),
+            description=data.get("description", ""),
+            start_time=start_time,
+            end_time=end_time,
+            due_date=start_time,  # Use start_time as due_date
+            priority=data.get("priority", 3),
+            duration=data.get("duration", 45),
+            status="not_completed",
+            location_id=location_id
+        )
+
         db.session.add(raw_task)
         db.session.commit()
         
@@ -119,8 +166,27 @@ def create_task():
         user = User.query.get(user_id)
         run_optimization(user)
         
-        # Redirect to get scheduled tasks
-        return get_scheduled_tasks()
+        # Get the newly created scheduled task
+        scheduled_task = ScheduledTask.query.filter_by(raw_task_id=raw_task.raw_task_id).first()
+        if not scheduled_task:
+            return jsonify({"error": "Task created but not scheduled"}), 500
+
+        # Return the newly created task with all its details
+        return jsonify({
+            "id": scheduled_task.sched_task_id,
+            "raw_task_id": raw_task.raw_task_id,
+            "title": raw_task.title,
+            "start_time": scheduled_task.scheduled_start_time.strftime("%-I:%M %p"),
+            "end_time": scheduled_task.scheduled_end_time.strftime("%-I:%M %p"),
+            "lat": location.latitude if location else None,
+            "lng": location.longitude if location else None,
+            "location_name": location.address if location else None,
+            "location_address": location.address if location else None,
+            "description": raw_task.description,
+            "priority": raw_task.priority,
+            "transit_mode": "car",
+            "is_completed": False
+        })
 
     except Exception as e:
         db.session.rollback()
@@ -305,3 +371,55 @@ def complete_single_task(task_id):
         db.session.rollback()
         current_app.logger.error(f"Failed to complete task: {e}")
         return jsonify({"error": "Failed to complete task"}), 500
+
+@tasks_bp.route("/api/tasks/<int:task_id>/toggle", methods=["POST"])
+def toggle_task_completion(task_id):
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        # Get the scheduled task
+        sched_task = ScheduledTask.query.filter(
+            and_(
+                ScheduledTask.sched_task_id == task_id,
+                ScheduledTask.user_id == user_id
+            )
+        ).first()
+
+        if not sched_task:
+            return jsonify({"error": "Scheduled task not found"}), 404
+
+        # Get the corresponding raw task
+        raw_task = RawTask.query.filter(
+            and_(
+                RawTask.raw_task_id == sched_task.raw_task_id,
+                RawTask.user_id == user_id
+            )
+        ).first()
+
+        if not raw_task:
+            return jsonify({"error": "Task not found"}), 404
+
+        # Toggle status
+        if raw_task.status == "completed":
+            raw_task.status = "not_completed"
+        else:
+            raw_task.status = "completed"
+        db.session.commit()
+
+        # Get user and run optimization for remaining tasks
+        user = User.query.get(user_id)
+        run_optimization(user)
+
+        return jsonify({
+            "message": "Task status changed successfully",
+            "task_id": task_id,
+            "raw_task_id": raw_task.raw_task_id,
+            "status": raw_task.status
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Failed to toggle task status: {e}")
+        return jsonify({"error": "Failed to toggle task status"}), 500
