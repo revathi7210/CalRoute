@@ -1,27 +1,11 @@
 import os
 from flask import Flask
 from flask_cors import CORS
-import redis
 from website.extensions import db, migrate
 from .optimize_routes import optimize_bp
-from .task_history import TaskHistoryManager
 
 def create_app():
     app = Flask(__name__)
-
-    # Initialize Redis client
-    redis_client = redis.Redis(
-        host=os.environ.get('REDIS_HOST', 'redis'),
-        port=int(os.environ.get('REDIS_PORT', 6379)),
-        db=0,
-        decode_responses=True  # This ensures we get strings back instead of bytes
-    )
-    
-    # Initialize TaskHistoryManager
-    task_history = TaskHistoryManager(redis_client)
-    
-    # Make task_history available throughout the app
-    app.task_history = task_history
 
     # Load critical config from environment variables
     app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["SQLALCHEMY_DATABASE_URI"]
