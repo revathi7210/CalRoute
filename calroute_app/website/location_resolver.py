@@ -1,35 +1,34 @@
-# location_resolver.py
-
+import os
 from .models import Location, UserPreference, db
+from .google_maps_helper import geocode_address
 
 def resolve_location_for_task(user, location_name, task_text):
     """
     Intelligent location resolver:
     1. If location_name is empty or 'none', return None
-    2. Check if location exists in Locations table for this user
-    3. Check user preference locations (home, favorite store)
-    4. Otherwise return None
+    2. Try resolving coordinates from name using geocoding
+    3. If coordinates exist in DB → return location
+    4. Else → insert and return new location
     """
     if not location_name or location_name.lower() in ['none', '']:
         return None
 
-    # 1️⃣ Check direct match in Locations table
-    location = Location.query.filter_by(user_id=user.user_id, name=location_name).first()
+    # Step 1: Try to resolve lat/lng from Google Maps
+    lat, lng = geocode_address(location_name)
+    if lat is None or lng is None:
+        return None
+
+    # Step 2: Check if location with same lat/lng already exists
+    location = Location.query.filter_by(latitude=lat, longitude=lng).first()
     if location:
         return location
 
-    # 2️⃣ Check user preference locations
-    user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
-    if user_pref:
-        possible_locations = []
-        if user_pref.home_location_id:
-            possible_locations.append(Location.query.get(user_pref.home_location_id))
-        if user_pref.favorite_store_location_id:
-            possible_locations.append(Location.query.get(user_pref.favorite_store_location_id))
-
-        for loc in possible_locations:
-            if loc and loc.name.lower() == location_name.lower():
-                return loc
-
-    # 3️⃣ No match found
-    return None
+    # Step 3: Add new location
+    new_location = Location(
+        address=location_name,
+        latitude=lat,
+        longitude=lng
+    )
+    db.session.add(new_location)
+    db.session.flush()  # populate location_id without committing
+    return new_location

@@ -6,7 +6,6 @@ import requests
 from flask import current_app
 
 logger = logging.getLogger(__name__)
-
 def find_nearest_location(api_key, query, user_lat, user_lng, radius=5000):
     """
     Uses Google Places API to find the nearest location based on a query and user's lat/lng.
@@ -27,15 +26,15 @@ def find_nearest_location(api_key, query, user_lat, user_lng, radius=5000):
         # Take the top result
         place = results[0]
         return {
-            'name': place['name'],
-            'address': place['vicinity'],
+            'address': place.get('vicinity'),
             'lat': place['geometry']['location']['lat'],
             'lng': place['geometry']['location']['lng'],
-            'place_id': place['place_id']
+            'place_id': place.get('place_id')
         }
     except Exception as e:
         logger.error(f"Google Maps API error: {e}")
         return None
+
 
 def geocode_address(address):
     """

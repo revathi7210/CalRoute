@@ -23,7 +23,11 @@ def create_app():
     app.config["GOOGLE_GENAI_API_KEY"] = os.environ.get("GOOGLE_GENAI_API_KEY")
 
     # ✅ Enable CORS so frontend can access backend
-    CORS(app, supports_credentials=True)
+    CORS(app, 
+         resources={r"/*": {"origins": ["http://localhost:8080"], 
+                           "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                           "allow_headers": ["Content-Type", "Authorization"],
+                           "supports_credentials": True}})
 
     # ✅ Init extensions
     db.init_app(app)

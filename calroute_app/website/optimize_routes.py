@@ -1,210 +1,388 @@
-# File: optimize_routes.py
+# optimize_routes.py
 
 from flask import Blueprint, session, request, jsonify
 from datetime import datetime, timedelta, time, date
 from .extensions import db
-from .models import RawTask, ScheduledTask, Location, User
-from .maps_utils import build_distance_matrix, solve_tsp
+from .models import RawTask, ScheduledTask, Location, User, UserPreference
+from .maps_utils import build_distance_matrix, solve_tsp, gmaps, GOOGLE_MAPS_API
 import requests
+import os
 
 optimize_bp = Blueprint("optimize", __name__)
 
-# --- Morning Schedule (default from home) ---
-@optimize_bp.route("/api/optimize_schedule", methods=["POST"])
-def optimize_schedule():
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
+# ... (existing routes) ...
 
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
+def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
+    """
+    Run optimization for tasks based on different scenarios.
 
-    success = run_optimization(user)
-    if not success:
-        return jsonify({"error": "Could not generate optimized route"}), 500
-
-    return jsonify({"success": True, "message": "Schedule optimized."})
-
-# --- Dynamic Schedule (re-optimization with current location) ---
-@optimize_bp.route("/api/dynamic_schedule", methods=["POST"])
-def dynamic_schedule():
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    lat = request.json.get("lat")
-    lng = request.json.get("lng")
-    print(lat)
-    print(lng)
-
-    if lat is None or lng is None:
-        return jsonify({"error": "Current location required"}), 400
-
-    success = run_optimization(user, current_lat=lat, current_lng=lng)
-    if not success:
-        return jsonify({"error": "Could not generate updated route"}), 500
-
-    return jsonify({"success": True, "message": "Route re-optimized from current location."})
-
-def reverse_geocode_osm(lat: float, lng: float) -> str | None:
-    url = "https://nominatim.openstreetmap.org/reverse"
-    params = {
-        "lat": lat,
-        "lon": lng,
-        "format": "jsonv2",
-    }
-    resp = requests.get(url, params=params, headers={"User-Agent": "CalRoute/1.0"}).json()
-    return resp.get("display_name")
-
-
-# → "Google Building 41, Amphitheatre Parkway, Mountain View, Santa Clara County, California, 94043, United States"
-
-
-def run_optimization(user, current_lat=None, current_lng=None):
-    from .maps_utils import build_distance_matrix
+    Args:
+        user: User object
+        current_lat: Current latitude (optional)
+        current_lng: Current longitude (optional)
+        sync_mode: If True, fetches fresh data
+    """
+    print(f"Starting optimization for user {user.user_id}")
+    print(f"Sync mode: {sync_mode}")
+    
     from .views.calendar import fetch_google_calendar_events
     from .views.todoist import parse_and_store_tasks
 
-    from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-    fetch_google_calendar_events(user)
-    parse_and_store_tasks(user)
+    if sync_mode:
+        print("Sync mode enabled - fetching fresh data from calendar and todoist")
+        fetch_google_calendar_events(user)
+        parse_and_store_tasks(user)
+        db.session.commit()
+        print("Data sync completed")
+
     tasks_with_locations = (
         db.session.query(RawTask, Location)
-        .join(Location, RawTask.location_id == Location.location_id)
+        .outerjoin(Location, RawTask.location_id == Location.location_id)
         .filter(
             RawTask.user_id == user.user_id,
-            Location.user_id == user.user_id
+            RawTask.status == 'not_completed'
         )
         .order_by(RawTask.start_time)
         .all()
     )
 
+    print(f"Found {len(tasks_with_locations)} tasks with locations to optimize")
+    
     if not tasks_with_locations:
-        print("No tasks with locations found.")
+        print("No tasks with locations found to optimize.")
         return False
 
-    home_address = "Verano Place, Irvine, CA"
-    #home_already_present = any("verano place" in loc.address.lower() for _, loc in tasks_with_locations)
+    pref = UserPreference.query.filter_by(user_id=user.user_id).first()
+    if not pref or not pref.home_location_id:
+        print("User preferences or home location not set.")
+        return False
+        
+    home_loc = Location.query.get(pref.home_location_id)
+    if not home_loc:
+        print("Home location not found in the database.")
+        return False
+    
+    print(f"Using home location: {home_loc.address}")
+
+    home_address = home_loc.address
     now = datetime.now()
 
     locations = []
     durations = []
     time_windows = []
+    task_indices = []
 
-    # 1) current-location first
+    # Set default start time to 8am (480 minutes since midnight)
+    default_start_time = 8 * 60  # 8:00 AM in minutes
+    
     if current_lat and current_lng:
         current_loc = reverse_geocode_osm(current_lat, current_lng)
-        print("current_loc:", current_loc)
         locations.append(current_loc)
         durations.append(0)
-        time_windows.append((now.hour * 60 + now.minute, 1440))
+        # If current time is after 8am, use current time, otherwise start at 8am
+        current_minutes = now.hour * 60 + now.minute
+        start_minutes = max(current_minutes, default_start_time)
+        time_windows.append((start_minutes, 1440))
     else:
         locations.append(home_address)
         durations.append(0)
-        time_windows.append((0, 1440))
+        time_windows.append((default_start_time, 1440))  # Start at 8am instead of midnight
 
-    # 2) then each task
-    for task, loc in tasks_with_locations:
-        locations.append(loc.address)
+    for i, (task, loc) in enumerate(tasks_with_locations):
+        if task.source == 'google_calendar' and task.start_time and task.end_time:
+            continue
 
-        # 1) Determine service duration
-        if task.start_time and task.end_time:
-            dur = int((task.end_time - task.start_time).total_seconds() // 60)
-        else:
-            # No fixed start: default to 30 minutes
-            dur = 30
-        durations.append(dur)
+        locations.append(loc.address if loc else home_address)
+        durations.append(task.duration if task.duration else 45)
 
-        # 2) Build time window
+        # If task has a start time, use it; otherwise use default 8am start
+        default_start_time = 8 * 60  # 8:00 AM in minutes
+        
         if task.start_time:
             start_min = task.start_time.hour * 60 + task.start_time.minute
         else:
-            start_min = 0
-
-        if task.end_time:
-            end_min = task.end_time.hour * 60 + task.end_time.minute
-        else:
-            end_min = 24 * 60  # whole day
-
+            start_min = default_start_time
+            
+        end_min = task.end_time.hour * 60 + task.end_time.minute if task.end_time else 24 * 60
         time_windows.append((start_min, end_min))
+        task_indices.append(i)
 
-    # for task, loc in tasks_with_locations:
-    #     locations.append(loc.address)
-
-    #     # duration in minutes (or a default)
-    #     if task.start_time and task.end_time:
-    #         delta = task.end_time - task.start_time
-    #         dur = int(delta.total_seconds() // 60)
-    #     else:
-    #         dur = 30
-    #     durations.append(dur)
-
-    #     # time window
-    #     start_min = (task.start_time.hour * 60 + task.start_time.minute) if task.start_time else 0
-    #     end_min = (task.end_time.hour * 60 + task.end_time.minute) if task.end_time else 1440
-    #     time_windows.append((start_min, end_min))
-
-    
     locations.append(home_address)
     durations.append(0)
-    time_windows.append((0, 1440))
+    # Allow return to home anytime after 8am
+    default_start_time = 8 * 60  # 8:00 AM in minutes
+    time_windows.append((default_start_time, 1440))
 
-    distance_matrix = build_distance_matrix(locations)
-    n = len(distance_matrix)
+    # Fetch user's preferred transit modes from preferences
+    user_transit_modes = {mode.mode for mode in pref.transit_modes}
+    if not user_transit_modes:
+        user_transit_modes = {'car'} # Default to car if no modes are set
 
-    print("\n📍 Locations:")
-    for i, addr in enumerate(locations):
-        print(f"{i}: {addr}")
+    # Get both the distance matrix and mode matrix from build_distance_matrix
+    distance_matrix, mode_matrix = build_distance_matrix(locations, modes=list(user_transit_modes))
     
-    for i, dur in enumerate(durations):
-        print(f"{i}: {dur}")
+    print("\n==== ROUTE OPTIMIZATION INPUTS ====")
+    print(f"Locations: {locations}")
+    print(f"Durations: {durations}")
+    print(f"Time Windows: {time_windows}")
+    print(f"Transit Modes: {user_transit_modes}")
     
-    for i, time_window in enumerate(time_windows):
-        print(f"{i}: {time_window}")
+    # Pass the mode_matrix to solve_tsp to get transit modes for each segment
+    route, start_times, total_travel_time, travel_modes = solve_tsp(
+        distance_matrix, 
+        task_durations=durations, 
+        time_windows=time_windows,
+        mode_matrix=mode_matrix
+    )
+    
+    print("\n==== ROUTE OPTIMIZATION OUTPUTS ====")
+    print(f"Route: {route}")
+    print(f"Start Times: {start_times}")
+    print(f"Total Travel Time: {total_travel_time}")
+    print(f"Travel Modes: {travel_modes}")
+    
+    if not route:
+        print("\n❌ Could not find a solution.")
+        return False
+        
+    print("\n✅ Solution found. Scheduling tasks...")
 
-    print("\n📏 Distance Matrix (minutes):")
-    for i, row in enumerate(distance_matrix):
-        row_str = " | ".join(f"{val:>5}" for val in row)
-        print(f"{i}: {row_str}")
-    print("\n")
-
-    #start_index = 0
-    #end_index = n-1
-    #route = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows, start_index=start_index, end_index=end_index)
-    route, start_times = solve_tsp(distance_matrix, task_durations=durations, time_windows=time_windows)
-    for i, start_time in enumerate(start_times):
-        print(f"{i}: {start_time}")
-    ## UPDATE THIS TO NOT DELETE
     ScheduledTask.query.filter_by(user_id=user.user_id).delete()
     db.session.commit()
 
-    print("tasksloc")
-    print(tasks_with_locations)
     today = datetime.now().date()
-    for idx in route:
-        # skip start and end depots
-        if idx == 0 or idx == n-1:
+
+    # Calculate travel times between consecutive locations
+    travel_times = []
+    print("\n==== CALCULATING TRAVEL TIMES ====")
+    for i in range(len(route) - 1):
+        from_idx = route[i]
+        to_idx = route[i + 1]
+        if from_idx < len(distance_matrix) and to_idx < len(distance_matrix[from_idx]):
+            # Get the raw distance in seconds from the matrix
+            raw_distance = distance_matrix[from_idx][to_idx]
+            # Skip if it's the same location (inf or 0 distance)
+            if raw_distance == float('inf') or raw_distance == 0:
+                travel_time = 0
+                print(f"Route segment {i}: {locations[from_idx]} -> {locations[to_idx]}")
+                print(f"  Same location or invalid distance, setting travel time to 0")
+            else:
+                # Convert seconds to minutes
+                travel_time = raw_distance / 60.0
+                print(f"Route segment {i}: {locations[from_idx]} -> {locations[to_idx]}")
+                print(f"  Raw distance: {raw_distance:.2f} seconds")
+                print(f"  Travel time: {travel_time:.2f} minutes")
+                print(f"  Mode: {travel_modes[i] if travel_modes and i < len(travel_modes) else 'unknown'}")
+            travel_times.append(travel_time)
+        else:
+            travel_times.append(0)
+            print(f"Warning: Invalid indices for travel time calculation: from_idx={from_idx}, to_idx={to_idx}")
+
+    print(f"\nAll calculated travel times: {[f'{t:.2f} min' for t in travel_times]}")
+    print(f"Total travel time from segments: {sum(travel_times):.2f} minutes")
+
+    # Verify travel times are reasonable
+    for i, t in enumerate(travel_times):
+        if t > 0 and t < 1:  # If travel time is less than 1 minute
+            print(f"Warning: Unrealistically short travel time ({t:.2f} min) for segment {i}")
+            # Use Google Maps API to get a more accurate time if available
+            if i < len(route) - 1 and GOOGLE_MAPS_API:
+                try:
+                    from_loc = locations[route[i]]
+                    to_loc = locations[route[i + 1]]
+                    mode = travel_modes[i] if travel_modes and i < len(travel_modes) else 'driving'
+                    print(f"Fetching accurate travel time from Google Maps for {from_loc} to {to_loc}")
+                    directions = gmaps.directions(from_loc, to_loc, mode=mode)
+                    if directions and len(directions) > 0:
+                        accurate_time = directions[0]['legs'][0]['duration']['value'] / 60.0
+                        print(f"Google Maps travel time: {accurate_time:.2f} minutes")
+                        travel_times[i] = accurate_time
+                except Exception as e:
+                    print(f"Error getting accurate travel time: {e}")
+
+    # Map internal mode names to user-friendly names
+    mode_display_names = {
+        'car': 'Driving',
+        'bike': 'Biking',
+        'bus_train': 'Public Transit',
+        'walking': 'Walking',
+        'rideshare': 'Rideshare'
+    }
+    
+    # Choose a default transit mode (first one available)
+    default_mode = list(user_transit_modes)[0] if user_transit_modes else 'car'
+    default_display_mode = mode_display_names.get(default_mode, 'Driving')
+    print(f"Using default transit mode: {default_display_mode}")
+    
+    # Schedule fixed-time tasks first with transit modes
+    for task, location in tasks_with_locations:
+        if task.source == 'google_calendar' and task.start_time and task.end_time:
+            # Find best transit mode based on distance from home to this location
+            best_mode = default_mode
+            
+            # Force specific modes for certain keywords in the address or title
+            if location:
+                force_mode = None
+                address_lower = location.address.lower() if location.address else ""
+                title_lower = task.title.lower() if task.title else ""
+                
+                # Force driving for airport, long distances
+                if 'airport' in address_lower or 'airport' in title_lower:
+                    force_mode = 'car'
+                    print(f"FORCING DRIVING MODE for airport location: {location.address}")
+                elif any(keyword in address_lower for keyword in ['santa ana', 'tustin', 'newport', 'costa mesa']):
+                    force_mode = 'car'
+                    print(f"FORCING DRIVING MODE for distant location: {location.address}")
+                
+                if force_mode:
+                    if force_mode in user_transit_modes:
+                        best_mode = force_mode
+                    print(f"Applied forced mode {force_mode} for {task.title} at {location.address}")
+                else:
+                    # Calculate distance from home to this location
+                    try:
+                        # Use direct Google Maps API call for this specific route
+                        if GOOGLE_MAPS_API:
+                            directions = gmaps.directions(
+                                home_address,
+                                location.address,
+                                mode="driving"  # Just to get distance
+                            )
+                            if directions and len(directions) > 0:
+                                # Extract distance in meters
+                                distance_meters = directions[0]['legs'][0]['distance']['value']
+                                distance = distance_meters / 1000  # km
+                                
+                                print(f"Distance calculation result for {task.title}: {distance:.2f} km")
+                                
+                                # Choose appropriate mode based on distance
+                                if distance < 1:  # Less than 1 km
+                                    best_mode = 'walking' if 'walking' in user_transit_modes else default_mode
+                                    print(f"Short distance ({distance:.2f} km): selecting walking mode")
+                                elif distance < 5:  # Less than 5 km
+                                    best_mode = 'bike' if 'bike' in user_transit_modes else default_mode
+                                    print(f"Medium distance ({distance:.2f} km): selecting biking mode")
+                                else:  # Over 5 km - driving
+                                    best_mode = 'car' if 'car' in user_transit_modes else default_mode
+                                    print(f"Long distance ({distance:.2f} km): selecting driving mode")
+                            else:
+                                print(f"No directions found for {task.title}, using default mode")
+                    except Exception as e:
+                        print(f"Error calculating distance for {task.title}: {e}")
+                        # If we get an error, use driving for safety
+                        if 'car' in user_transit_modes:
+                            best_mode = 'car'
+                            print(f"Error occurred - defaulting to driving mode for {task.title}")
+            
+            print(f"Final mode for {task.title}: {best_mode}")
+            
+            # Get user-friendly name for the transit mode
+            display_mode = mode_display_names.get(best_mode, 'car')
+            
+            # Calculate travel time for this task
+            travel_time = 0
+            if GOOGLE_MAPS_API:
+                try:
+                    print(f"\nCalculating travel time for fixed task: {task.title}")
+                    print(f"From: {home_address}")
+                    print(f"To: {location.address}")
+                    print(f"Mode: {best_mode}")
+                    
+                    # Ensure we're using a valid mode for Google Maps
+                    gmaps_mode = best_mode
+                    if best_mode == 'bike':
+                        gmaps_mode = 'bicycling'  # Google Maps uses 'bicycling' instead of 'bike'
+                    elif best_mode == 'bus_train':
+                        gmaps_mode = 'transit'    # Google Maps uses 'transit' instead of 'bus_train'
+                    
+                    directions = gmaps.directions(
+                        home_address,
+                        location.address,
+                        mode=gmaps_mode
+                    )
+                    if directions and len(directions) > 0:
+                        raw_duration = directions[0]['legs'][0]['duration']['value']
+                        travel_time = raw_duration / 60.0  # Convert to minutes
+                        print(f"Raw duration: {raw_duration} seconds")
+                        print(f"Calculated travel time: {travel_time:.2f} minutes")
+                    else:
+                        print("No directions found, using fallback calculation")
+                        # Fallback to distance-based calculation if no directions
+                        if location and home_loc:
+                            # Rough estimate: 1 km = 2 minutes by car, 4 minutes by bike, 12 minutes walking
+                            distance_km = ((location.latitude - home_loc.latitude) ** 2 + 
+                                         (location.longitude - home_loc.longitude) ** 2) ** 0.5 * 111
+                            if best_mode == 'car':
+                                travel_time = distance_km * 2
+                            elif best_mode == 'bike':
+                                travel_time = distance_km * 4
+                            else:  # walking
+                                travel_time = distance_km * 12
+                            print(f"Fallback travel time: {travel_time:.2f} minutes")
+                except Exception as e:
+                    print(f"Error calculating travel time for {task.title}: {e}")
+                    # Use fallback calculation on error
+                    if location and home_loc:
+                        distance_km = ((location.latitude - home_loc.latitude) ** 2 + 
+                                     (location.longitude - home_loc.longitude) ** 2) ** 0.5 * 111
+                        travel_time = distance_km * 2  # Default to car speed
+                        print(f"Fallback travel time after error: {travel_time:.2f} minutes")
+            
+            sched = ScheduledTask(
+                user_id=user.user_id,
+                raw_task_id=task.raw_task_id,
+                title=task.title,
+                description=task.description,
+                location_id=task.location_id,
+                scheduled_start_time=task.start_time,
+                scheduled_end_time=task.end_time,
+                status="pending",
+                priority=task.priority,
+                travel_eta_minutes=travel_time,
+                transit_mode=best_mode  # Store canonical value
+            )
+            print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
+            db.session.add(sched)
+
+    # Schedule flexible tasks based on the optimized route
+    for i, idx in enumerate(route):
+        if idx == 0 or idx == len(locations) - 1:
             continue
 
-        task_idx = idx - 1
+        task_idx = task_indices[idx - 1]
         raw, _ = tasks_with_locations[task_idx]
         dur = durations[idx]
 
-        # priority 1 → use original calendar times
-        if raw.priority == 1 and raw.start_time and raw.end_time:
-            st = raw.start_time
-            et = raw.end_time
+        mins = start_times[idx]
+        st = datetime.combine(today, time(mins // 60, mins % 60))
+        et = st + timedelta(minutes=dur)
+        
+        # Get the transit mode for this task (from previous location)
+        transit_mode = None
+        if i > 0 and travel_modes and i-1 < len(travel_modes):  # Not the first task and within travel_modes bounds
+            transit_mode = travel_modes[i-1]
+            print(f"Task {raw.title}: Using transit mode {transit_mode}")
         else:
-            # solver time in minutes since midnight
-            mins = start_times[idx]
-            st = datetime.combine(today, time(mins // 60, mins % 60))
-            et = st + timedelta(minutes=dur)
+            print(f"Task {raw.title}: No transit mode available, using default")
 
+        # Get travel time for this task
+        travel_time = travel_times[i-1] if i > 0 else 0
+        print(f"\nFlexible task: {raw.title}")
+        print(f"Using travel time: {travel_time:.2f} minutes")
+        print(f"Transit mode: {transit_mode if transit_mode else default_mode}")
+        
+        # Map internal mode names to user-friendly names
+        mode_display_names = {
+            'car': 'Driving',
+            'bike': 'Biking',
+            'bus_train': 'Public Transit',
+            'walking': 'Walking',
+            'rideshare': 'Rideshare'
+        }
+        
+        # Get user-friendly name for the transit mode
+        display_mode = mode_display_names.get(transit_mode, 'Driving') if transit_mode else 'Driving'
+        
         sched = ScheduledTask(
             user_id=user.user_id,
             raw_task_id=raw.raw_task_id,
@@ -215,10 +393,12 @@ def run_optimization(user, current_lat=None, current_lng=None):
             scheduled_end_time=et,
             status="pending",
             priority=raw.priority,
-            travel_eta_minutes=0
+            travel_eta_minutes=travel_time,
+            transit_mode=transit_mode if transit_mode else default_mode  # Store canonical value
         )
         db.session.add(sched)
 
     db.session.commit()
-    print("✅ Schedule optimized.")
+    print("\n✅ Schedule optimized successfully.")
+    print(f"Scheduled {len(route)-2} tasks")  # Subtract 2 for start/end depot
     return True

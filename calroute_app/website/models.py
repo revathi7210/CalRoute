@@ -1,7 +1,23 @@
 from flask_sqlalchemy import SQLAlchemy
 from .extensions import db
 
+# ---------- Association Tables ----------
+# Multi-select for up to three transit modes per user preference
+user_transit_modes = db.Table(
+    'user_transit_modes',
+    db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
+    db.Column('mode', db.String(20), db.ForeignKey('transit_mode_options.mode', ondelete='CASCADE'), primary_key=True)
+)
+
+# Multi-select for up to three favorite stores per user preference
+user_favorite_stores = db.Table(
+    'user_favorite_stores',
+    db.Column('pref_id', db.Integer, db.ForeignKey('user_preferences.pref_id', ondelete='CASCADE'), primary_key=True),
+    db.Column('location_id', db.Integer, db.ForeignKey('locations.location_id', ondelete='CASCADE'), primary_key=True)
+)
+
 # ---------- Core Entities ----------
+
 class User(db.Model):
     __tablename__ = 'users'
     user_id = db.Column(db.Integer, primary_key=True)
@@ -11,31 +27,36 @@ class User(db.Model):
     todoist_token = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
-    # Relationships
-    locations = db.relationship('Location', backref='user', lazy=True, cascade='all, delete-orphan')
     raw_tasks = db.relationship('RawTask', backref='user', lazy=True, cascade='all, delete-orphan')
     scheduled_tasks = db.relationship('ScheduledTask', backref='user', lazy=True, cascade='all, delete-orphan')
     user_preferences = db.relationship('UserPreference', backref='user', lazy=True, cascade='all, delete-orphan')
     user_habits = db.relationship('UserHabit', backref='user', lazy=True, cascade='all, delete-orphan')
 
-# ---------- Locations ----------
 
 class Location(db.Model):
     __tablename__ = 'locations'
     location_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
-    name = db.Column(db.String(100))
-    address = db.Column(db.String(255))
-    latitude = db.Column(db.Float)
-    longitude = db.Column(db.Float)
+    address = db.Column(db.String(255), nullable=False)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint('latitude', 'longitude', name='uq_location_coords'),
+    )
 
-# ---------- Raw Tasks ----------
+
+class TransitModeOption(db.Model):
+    __tablename__ = 'transit_mode_options'
+    mode = db.Column(db.String(20), primary_key=True)
+    # You can enforce choices in your app logic: 'car','bike','bus_train','walking','rideshare'
+    def __repr__(self):
+        return f"<TransitModeOption {self.mode}>"
+
 
 class RawTask(db.Model):
     __tablename__ = 'raw_tasks'
     raw_task_id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
-    source = db.Column(db.Enum('google_calendar', 'todoist', name='task_source'), nullable=False)
+    source = db.Column(db.Enum('google_calendar', 'todoist', 'manual', name='task_source'), nullable=False)
     external_id = db.Column(db.String(255), unique=True, nullable=False)
     title = db.Column(db.String(255))
     description = db.Column(db.Text)
@@ -44,46 +65,46 @@ class RawTask(db.Model):
     end_time = db.Column(db.DateTime, nullable=True)
     due_date = db.Column(db.DateTime, nullable=True)
     priority = db.Column(db.Integer, default=3)
-    raw_data = db.Column(db.JSON)
+    duration = db.Column(db.Integer, nullable=True)  # in minutes
+    status = db.Column(db.Enum('not_completed', 'completed', name='task_status'), default='not_completed', nullable=False)
     imported_at = db.Column(db.DateTime, server_default=db.func.now())
 
-
-# ---------- User Preferences ----------
 
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
     pref_id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'))
+    user_id = db.Column(db.Integer, db.ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
 
     max_daily_hours = db.Column(db.Float, default=8.0)
     work_start_time = db.Column(db.Time, nullable=True)
     work_end_time = db.Column(db.Time, nullable=True)
 
-    travel_mode = db.Column(
-        db.Enum('car', 'bike', 'bus_train', 'walking', 'rideshare',
-                name='travel_mode'),
-        default='car', nullable=True
-    )
-
     prioritization_style = db.Column(
-        db.Enum('important_first', 'quick_wins', 'balanced',
-                name='prioritization_style'),
+        db.Enum('important_first', 'quick_wins', 'balanced', name='prioritization_style'),
         default='balanced', nullable=False
     )
 
-    # NEW fields to link to Location table
-    home_location_id = db.Column(
-        db.Integer,
-        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
-        nullable=True
-    )
-    favorite_store_location_id = db.Column(
-        db.Integer,
-        db.ForeignKey('locations.location_id', ondelete='SET NULL'),
-        nullable=True
+    # Multi-select relationships (enforce up to 3 in app logic)
+    transit_modes = db.relationship(
+        'TransitModeOption',
+        secondary=user_transit_modes,
+        collection_class=set,
+        backref='user_preferences'
     )
 
-# ---------- User Habits ----------
+    favorite_store_locations = db.relationship(
+        'Location',
+        secondary=user_favorite_stores,
+        backref='favored_by_users'
+    )
+
+    # Home & Gym locations
+    home_location_id = db.Column(db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True)
+    gym_location_id = db.Column(db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True)
+
+    home_location = db.relationship('Location', foreign_keys=[home_location_id], post_update=True, backref='home_for_preferences')
+    gym_location = db.relationship('Location', foreign_keys=[gym_location_id], post_update=True, backref='gym_for_preferences')
+
 
 class UserHabit(db.Model):
     __tablename__ = 'user_habits'
@@ -94,7 +115,6 @@ class UserHabit(db.Model):
     duration_minutes = db.Column(db.Integer)
     weight = db.Column(db.Float, default=1.0)
 
-# ---------- Scheduled Tasks ----------
 
 class ScheduledTask(db.Model):
     __tablename__ = 'scheduled_tasks'
@@ -109,6 +129,5 @@ class ScheduledTask(db.Model):
     status = db.Column(db.Enum('pending', 'completed', 'cancelled', name='task_status'), default='pending')
     priority = db.Column(db.Integer, default=3)
     travel_eta_minutes = db.Column(db.Float)
+    transit_mode = db.Column(db.String(20), nullable=True)  # Store the selected transit mode
     created_at = db.Column(db.DateTime, server_default=db.func.now())
-
-# ---------- Schedule Logs ----------

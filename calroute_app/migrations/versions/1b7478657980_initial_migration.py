@@ -51,7 +51,7 @@ def upgrade():
     op.create_table('raw_tasks',
     sa.Column('raw_task_id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=True),
-    sa.Column('source', sa.Enum('google_calendar', 'todoist', name='task_source'), nullable=False),
+    sa.Column('source', sa.Enum('google_calendar', 'todoist', 'manual',name='task_source'), nullable=False),
     sa.Column('external_id', sa.String(length=255), nullable=False),
     sa.Column('title', sa.String(length=255), nullable=True),
     sa.Column('description', sa.Text(), nullable=True),
