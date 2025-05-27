@@ -59,9 +59,18 @@ def get_scheduled_tasks():
     )
 
     tasks = []
+    total_travel_time = None
+
+    # Calculate total travel time from travel_eta_minutes
     for sched_task, location, raw_task in results:
         if not location:
             continue
+        if sched_task.travel_eta_minutes:
+            if total_travel_time is None:
+                total_travel_time = 0
+            total_travel_time += sched_task.travel_eta_minutes
+            current_app.logger.info(f"Adding travel time {sched_task.travel_eta_minutes} for task {sched_task.title}, new total: {total_travel_time}")
+
         tasks.append({
             "id": sched_task.sched_task_id,
             "raw_task_id": sched_task.raw_task_id if hasattr(sched_task, 'raw_task_id') else None,
@@ -78,7 +87,11 @@ def get_scheduled_tasks():
             "is_completed": raw_task.status == "completed",
         })
 
-    return jsonify({"tasks": tasks})
+    current_app.logger.info(f"Final total travel time: {total_travel_time}")
+    return jsonify({
+        "tasks": tasks,
+        "total_travel_time": round(total_travel_time) if total_travel_time is not None else None
+    })
 
 @tasks_bp.route("/api/tasks", methods=["POST"])
 def create_task():
@@ -667,8 +680,9 @@ def toggle_task_completion(task_id):
         db.session.commit()
 
         # Get user and run optimization for remaining tasks
-        user = User.query.get(user_id)
-        run_optimization(user)
+        #DO NOT RUN OPTIMIZATION HERE
+        #user = User.query.get(user_id)
+        #run_optimization(user)
 
         return jsonify({
             "message": "Task status changed successfully",
@@ -681,3 +695,28 @@ def toggle_task_completion(task_id):
         db.session.rollback()
         current_app.logger.error(f"Failed to toggle task status: {e}")
         return jsonify({"error": "Failed to toggle task status"}), 500
+
+@tasks_bp.route("/api/sync", methods=["POST"])
+def sync_tasks():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    try:
+        # Run optimization with sync_mode=True to fetch fresh data
+        success = run_optimization(user, sync_mode=True)
+        if not success:
+            return jsonify({"error": "Failed to sync and optimize tasks"}), 500
+
+        return jsonify({
+            "message": "Successfully synced and optimized tasks",
+            "success": True
+        })
+
+    except Exception as e:
+        current_app.logger.error(f"Sync failed: {str(e)}")
+        return jsonify({"error": f"Sync failed: {str(e)}"}), 500
