@@ -111,8 +111,7 @@ def parse_and_store_tasks(user):
         task_lower = task_title.lower()
         if place_type == "gym" or any(x in task_lower for x in ['workout', 'exercise', 'gym']):
             gym = preferred_locations.get("gym")
-            if gym and can_task_at_preferred(task_title, gym["address"]):
-                return Location.query.get(gym["location_id"])
+            return Location.query.get(gym["location_id"])
 
         if place_type in ["supermarket", "grocery_store"] or any(x in task_lower for x in ['buy', 'shop', 'grocery']):
             for store in preferred_locations.get("grocery_stores", []):
