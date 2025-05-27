@@ -279,18 +279,46 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         # Get user-friendly name for the transit mode
         display_mode = mode_display_names.get(transit_mode, 'Driving') if transit_mode else 'Driving'
         
-        sched = ScheduledTask(
-            user_id=user.user_id,
-            raw_task_id=raw.raw_task_id,
-            title=raw.title,
-            description=raw.description,
-            location_id=raw.location_id,
-            scheduled_start_time=st,
-            scheduled_end_time=et,
-            priority=raw.priority,
-            travel_eta_minutes=0,
-            transit_mode=display_mode  # Store the selected transit mode
-        )
+        # Explicitly handle datetime objects to prevent 'not iterable' errors
+        try:
+            # Make sure start and end times are valid datetime objects
+            if not isinstance(st, datetime) or not isinstance(et, datetime):
+                print(f"Invalid datetime objects for task {raw.title} - st: {type(st)}, et: {type(et)}")
+                # Use current time as fallback
+                current_time = datetime.now()
+                st = current_time
+                et = current_time + timedelta(minutes=dur)
+            
+            sched = ScheduledTask(
+                user_id=user.user_id,
+                raw_task_id=raw.raw_task_id,
+                title=raw.title,
+                description=raw.description,
+                location_id=raw.location_id,
+                scheduled_start_time=st,
+                scheduled_end_time=et,
+                priority=raw.priority,
+                travel_eta_minutes=0,
+                transit_mode=display_mode  # Store the selected transit mode
+            )
+        except Exception as dt_err:
+            print(f"Error handling datetime for task {raw.title}: {dt_err}")
+            import traceback
+            print(f"Datetime error traceback: {traceback.format_exc()}")
+            # Create with default times
+            now = datetime.now()
+            sched = ScheduledTask(
+                user_id=user.user_id,
+                raw_task_id=raw.raw_task_id,
+                title=raw.title,
+                description=raw.description,
+                location_id=raw.location_id,
+                scheduled_start_time=now,
+                scheduled_end_time=now + timedelta(minutes=dur),
+                priority=raw.priority,
+                travel_eta_minutes=0,
+                transit_mode=display_mode
+            )
         db.session.add(sched)
 
     db.session.commit()

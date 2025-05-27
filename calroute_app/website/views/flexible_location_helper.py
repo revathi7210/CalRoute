@@ -53,24 +53,62 @@ def update_flexible_task_locations(user_id: int) -> None:
             continue
             
         current_app.logger.info(f"[FLEXIBLE_LOCATION] Found POI: {poi}")
-        # 4. Upsert Location
-        loc = (
-            Location.query
-            .filter_by(latitude=poi["lat"], longitude=poi["lng"])  # dedupe by coords
-            .first()
-        )
-        if not loc:
-            # POI results from Google Maps already have a nice place name field
-            # but we'll still run it through our extractor for consistency
-            place_name = poi["name"] if "name" in poi else extract_place_name(poi["address"])
-            loc = Location(
-                name=place_name,
-                address=poi["address"],
-                latitude=poi["lat"],
-                longitude=poi["lng"]
-            )
-            db.session.add(loc)
-            db.session.flush()
+        # 4. Upsert Location - First try to find by address
+        poi_address = poi.get("address", "")
+        poi_name = poi.get("name", "")
+        
+        try:
+            # First check for existing location by address (case insensitive)
+            loc = None
+            if poi_address:
+                # Use ilike for case-insensitive matching if database supports it
+                # Filter with SQL LIKE to find similar addresses
+                from sqlalchemy import func
+                existing_locations = Location.query.filter(
+                    func.lower(Location.address).contains(func.lower(poi_address.split(',')[0]))
+                ).all()
+                
+                if existing_locations:
+                    current_app.logger.info(f"[FLEXIBLE_LOCATION] Found {len(existing_locations)} potential matching locations by address")
+                    # Pick the one with closest coordinates
+                    closest_loc = None
+                    min_dist = float('inf')
+                    for l in existing_locations:
+                        dist = ((l.latitude - poi["lat"])**2 + (l.longitude - poi["lng"])**2)**0.5
+                        if dist < min_dist:
+                            min_dist = dist
+                            closest_loc = l
+                    
+                    # If distance is small enough, use the existing location
+                    if min_dist < 0.0005:  # Approximately 50-100 meters depending on latitude
+                        loc = closest_loc
+                        current_app.logger.info(f"[FLEXIBLE_LOCATION] Using existing location '{loc.name}' with distance {min_dist}")
+            
+            # If no match by address, try by exact coordinates
+            if not loc:
+                loc = Location.query.filter_by(latitude=poi["lat"], longitude=poi["lng"]).first()
+                if loc:
+                    current_app.logger.info(f"[FLEXIBLE_LOCATION] Found exact coordinate match for location: {loc.name}")
+            
+            # If still no match, create a new location
+            if not loc:
+                # POI results from Google Maps already have a nice place name field
+                # but we'll still run it through our extractor for consistency
+                place_name = poi_name if poi_name else extract_place_name(poi_address)
+                loc = Location(
+                    name=place_name,
+                    address=poi_address,
+                    latitude=poi["lat"],
+                    longitude=poi["lng"]
+                )
+                db.session.add(loc)
+                db.session.flush()
+                current_app.logger.info(f"[FLEXIBLE_LOCATION] Created new location: {place_name}")
+        except Exception as loc_err:
+            current_app.logger.error(f"[FLEXIBLE_LOCATION] Error finding/creating location: {str(loc_err)}")
+            import traceback
+            current_app.logger.error(f"[FLEXIBLE_LOCATION] Location error traceback: {traceback.format_exc()}")
+            continue  # Skip this task if location handling fails
         # 5. Update task location but preserve flexibility
         old_location_id = task.location_id
         task.location_id = loc.location_id  # Fixed field name from id to location_id

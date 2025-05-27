@@ -1,6 +1,7 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from flask import current_app
 from website.extensions import db
 from website.models import RawTask, Location, UserPreference
@@ -46,7 +47,6 @@ def parse_and_store_tasks(user):
             flat_tasks.extend(item)
         else:
             flat_tasks.append(item)
-
     todoist_lines = []
     for t in flat_tasks:
         due_str = t.due.string if hasattr(t, 'due') and t.due and hasattr(t.due, 'string') and t.due.string else 'None'

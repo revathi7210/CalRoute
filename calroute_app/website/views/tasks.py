@@ -5,7 +5,8 @@ from website.location_utils import extract_place_name
 from website.views.calendar import fetch_google_calendar_events
 from website.views.todoist import parse_and_store_tasks
 from website.optimize_routes import run_optimization
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import pytz
 from sqlalchemy import and_
 from website.google_maps_helper import geocode_address
 from website.location_resolver import handle_task_mutation
@@ -135,29 +136,41 @@ def create_task():
         start_time = None
         end_time = None
         if data.get("start_time"):
-            start_time = datetime.fromisoformat(data["start_time"])
+            # Parse the ISO timestamp and make sure it's in UTC if no timezone is provided
+            start_time = datetime.fromisoformat(data["start_time"].replace('Z', '+00:00'))
             if start_time.tzinfo is None:
                 start_time = start_time.replace(tzinfo=timezone.utc)
-            # Ensure start time is today (UTC)
-            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            tomorrow = today.replace(day=today.day + 1)
-            if not (today <= start_time < tomorrow):
-                return jsonify({"error": "Start time must be for today"}), 400
+                
+            # Convert to Pacific time
+            pacific = pytz.timezone('US/Pacific')
+            start_time = start_time.astimezone(pacific)
             
-            # Ensure start time is in the future
-            now = datetime.now(timezone.utc)
-            if start_time.hour * 60 + start_time.minute <= now.hour * 60 + now.minute and start_time.date() == now.date():
-                return jsonify({"error": "Start time must be after current time"}), 400
+            # Use Pacific date for validation
+            today_pacific = datetime.now(pacific).replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow_pacific = today_pacific + timedelta(days=1)
+            if not (today_pacific <= start_time < tomorrow_pacific):
+                return jsonify({"error": "Start time must be for today in Pacific time"}), 400
+            
+            # Ensure start time is in the future (using Pacific time)
+            now_pacific = datetime.now(pacific)
+            if start_time.hour * 60 + start_time.minute <= now_pacific.hour * 60 + now_pacific.minute and start_time.date() == now_pacific.date():
+                return jsonify({"error": "Start time must be after current Pacific time"}), 400
 
         if data.get("end_time"):
-            end_time = datetime.fromisoformat(data["end_time"])
+            # Parse the ISO timestamp and make sure it's in UTC if no timezone is provided
+            end_time = datetime.fromisoformat(data["end_time"].replace('Z', '+00:00'))
             if end_time.tzinfo is None:
                 end_time = end_time.replace(tzinfo=timezone.utc)
-            # Ensure end time is today (UTC)
-            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            tomorrow = today.replace(day=today.day + 1)
-            if not (today <= end_time < tomorrow):
-                return jsonify({"error": "End time must be for today"}), 400
+                
+            # Convert to Pacific time
+            pacific = pytz.timezone('US/Pacific')
+            end_time = end_time.astimezone(pacific)
+            
+            # Use Pacific date for validation
+            today_pacific = datetime.now(pacific).replace(hour=0, minute=0, second=0, microsecond=0)
+            tomorrow_pacific = today_pacific + timedelta(days=1)
+            if not (today_pacific <= end_time < tomorrow_pacific):
+                return jsonify({"error": "End time must be for today in Pacific time"}), 400
             
             # Ensure end time is after start time
             if start_time and (end_time.hour * 60 + end_time.minute <= start_time.hour * 60 + start_time.minute):
@@ -261,9 +274,15 @@ def update_task(task_id):
         if 'priority' in data:
             task.priority = data['priority']
         if 'start_time' in data:
-            task.start_time = datetime.fromisoformat(data['start_time'].replace('Z', '+00:00'))
+            # Convert from UTC to Pacific time
+            utc_time = datetime.fromisoformat(data['start_time'].replace('Z', '+00:00'))
+            pacific = pytz.timezone('US/Pacific')
+            task.start_time = utc_time.astimezone(pacific)
         if 'end_time' in data:
-            task.end_time = datetime.fromisoformat(data['end_time'].replace('Z', '+00:00'))
+            # Convert from UTC to Pacific time
+            utc_time = datetime.fromisoformat(data['end_time'].replace('Z', '+00:00'))
+            pacific = pytz.timezone('US/Pacific')
+            task.end_time = utc_time.astimezone(pacific)
         if 'duration' in data:
             task.duration = data['duration']
 
@@ -317,29 +336,60 @@ def update_task(task_id):
             # Update task's location
             task.location_id = location.location_id
 
-        # Commit the initial changes
+        # Commit the initial changes to ensure the task update is fully persisted
         db.session.commit()
 
         try:
-           # Run the optimization pipeline
-           current_app.logger.info(f"Starting optimization for user {user_id} after task creation")
-           handle_task_mutation(user_id)
-           current_app.logger.info("Optimization completed successfully")
-          
-           # Return updated scheduled tasks
-           return get_scheduled_tasks()
+            # First, verify that the task still exists after the commit
+            updated_task = RawTask.query.filter_by(raw_task_id=task_id, user_id=user_id).first()
+            if not updated_task:
+                current_app.logger.error(f"Task {task_id} not found after commit")
+                return jsonify({'error': 'Task not found after update'}), 404
+                
+            # Save the current ScheduledTask entries in case optimization fails
+            backup_scheduled_tasks = ScheduledTask.query.filter_by(
+                user_id=user_id, 
+                raw_task_id=task_id
+            ).all()
+            
+            # Run the optimization pipeline
+            current_app.logger.info(f"Starting optimization for user {user_id} after task update")
+            try:
+                handle_task_mutation(user_id)
+                current_app.logger.info("Optimization completed successfully")
+            except Exception as mutation_error:
+                # Log the specific error from handle_task_mutation
+                current_app.logger.error(f"Task mutation error: {str(mutation_error)}")
+                import traceback
+                current_app.logger.error(f"Task mutation traceback: {traceback.format_exc()}")
+                
+                # Check if ScheduledTasks were created for this task
+                scheduled_count = ScheduledTask.query.filter_by(
+                    user_id=user_id, 
+                    raw_task_id=task_id
+                ).count()
+                
+                if scheduled_count == 0 and backup_scheduled_tasks:
+                    current_app.logger.info(f"Restoring {len(backup_scheduled_tasks)} backup ScheduledTask entries")
+                    # Restore from backup if optimization failed to create new entries
+                    for sched_task in backup_scheduled_tasks:
+                        db.session.add(sched_task)
+                    db.session.commit()
+           
+            # Return updated scheduled tasks
+            return get_scheduled_tasks()
         except Exception as opt_error:
-           # If optimization fails, we still created the task successfully
-           # Log the error but return success to the user
-           current_app.logger.error(f"Optimization error: {str(opt_error)}")
-           current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+            # If optimization fails, we still updated the task successfully
+            # Log the error but return success to the user
+            current_app.logger.error(f"Optimization error: {str(opt_error)}")
+            current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
           
-           return jsonify({
-               "message": "Task created successfully, but schedule optimization failed",
-               "task_id": raw_task.raw_task_id,
-               "title": raw_task.title,
-               "optimization_error": str(opt_error)
-           })
+            return jsonify({
+                "message": "Task updated successfully, but schedule optimization failed",
+                "task_id": task.raw_task_id,
+                "title": task.title,
+                "optimization_error": str(opt_error)
+             })
 
         # Run optimization to update the schedule
 
@@ -412,46 +462,48 @@ def delete_task(raw_task_id):
             current_app.logger.warning(f"Delete task failed: Raw task {raw_task_id} not found for user {user_id}")
             return jsonify({"error": "Task not found"}), 404
 
-        # Also delete any associated scheduled task
-        scheduled_task = ScheduledTask.query.filter_by(raw_task_id=raw_task_id).first()
-        if scheduled_task:
-            current_app.logger.info(f"Deleting associated scheduled task {scheduled_task.sched_task_id}")
-            db.session.delete(scheduled_task)
+        # Store task info before deletion for error messages
+        task_title = task.title
 
-        # Delete the raw task
-        current_app.logger.info(f"Deleting raw task {raw_task_id}")
-        db.session.delete(task)
+        # Use SQL-style delete for scheduled tasks to avoid relationship issues
+        scheduled_task_count = ScheduledTask.query.filter_by(raw_task_id=raw_task_id, user_id=user_id).delete(synchronize_session=False)
+        current_app.logger.info(f"Deleted {scheduled_task_count} associated scheduled tasks for raw task {raw_task_id}")
+        
+        # Delete the raw task using SQL-style delete
+        raw_task_count = RawTask.query.filter_by(raw_task_id=raw_task_id, user_id=user_id).delete(synchronize_session=False)
+        current_app.logger.info(f"Deleted {raw_task_count} raw tasks with ID {raw_task_id}")
+        
+        # Commit the deletion operations
         db.session.commit()
         
         # Re-run optimization to update the schedule
         try:
-           # Run the optimization pipeline
-           current_app.logger.info(f"Starting optimization for user {user_id} after task creation")
-           handle_task_mutation(user_id)
-           current_app.logger.info("Optimization completed successfully")
-          
-           # Return updated scheduled tasks
-           return get_scheduled_tasks()
+            # Run the optimization pipeline
+            current_app.logger.info(f"Starting optimization for user {user_id} after task deletion")
+            handle_task_mutation(user_id)
+            current_app.logger.info("Optimization completed successfully")
+            
+            # Return updated scheduled tasks
+            return get_scheduled_tasks()
         except Exception as opt_error:
-           # If optimization fails, we still created the task successfully
-           # Log the error but return success to the user
-           current_app.logger.error(f"Optimization error: {str(opt_error)}")
-           current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
-          
-           return jsonify({
-               "message": "Task created successfully, but schedule optimization failed",
-               "task_id": raw_task.raw_task_id,
-               "title": raw_task.title,
-               "optimization_error": str(opt_error)
-           })
-
-        
-        current_app.logger.info(f"Successfully deleted raw task {raw_task_id} and updated schedule")
-        return jsonify({"message": "Task deleted successfully"})
+            # If optimization fails, we still deleted the task successfully
+            # Log the error but return success to the user
+            import traceback
+            current_app.logger.error(f"Optimization error after task deletion: {str(opt_error)}")
+            current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+            
+            return jsonify({
+                "message": "Task deleted successfully, but schedule optimization failed",
+                "task_id": raw_task_id,
+                "title": task_title,
+                "optimization_error": str(opt_error)
+            })
 
     except Exception as e:
         db.session.rollback()
+        import traceback
         current_app.logger.error(f"Delete task failed with error: {str(e)}")
+        current_app.logger.error(f"Delete task traceback: {traceback.format_exc()}")
         return jsonify({"error": f"Failed to delete task: {str(e)}"}), 500
 
 @tasks_bp.route("/api/pending_tasks", methods=["GET"])
