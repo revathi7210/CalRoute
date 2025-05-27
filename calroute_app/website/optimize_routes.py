@@ -152,6 +152,54 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
 
     today = datetime.now().date()
 
+    # Calculate travel times between consecutive locations
+    travel_times = []
+    print("\n==== CALCULATING TRAVEL TIMES ====")
+    for i in range(len(route) - 1):
+        from_idx = route[i]
+        to_idx = route[i + 1]
+        if from_idx < len(distance_matrix) and to_idx < len(distance_matrix[from_idx]):
+            # Get the raw distance in seconds from the matrix
+            raw_distance = distance_matrix[from_idx][to_idx]
+            # Skip if it's the same location (inf or 0 distance)
+            if raw_distance == float('inf') or raw_distance == 0:
+                travel_time = 0
+                print(f"Route segment {i}: {locations[from_idx]} -> {locations[to_idx]}")
+                print(f"  Same location or invalid distance, setting travel time to 0")
+            else:
+                # Convert seconds to minutes
+                travel_time = raw_distance / 60.0
+                print(f"Route segment {i}: {locations[from_idx]} -> {locations[to_idx]}")
+                print(f"  Raw distance: {raw_distance:.2f} seconds")
+                print(f"  Travel time: {travel_time:.2f} minutes")
+                print(f"  Mode: {travel_modes[i] if travel_modes and i < len(travel_modes) else 'unknown'}")
+            travel_times.append(travel_time)
+        else:
+            travel_times.append(0)
+            print(f"Warning: Invalid indices for travel time calculation: from_idx={from_idx}, to_idx={to_idx}")
+
+    print(f"\nAll calculated travel times: {[f'{t:.2f} min' for t in travel_times]}")
+    print(f"Total travel time from segments: {sum(travel_times):.2f} minutes")
+
+    # Verify travel times are reasonable
+    for i, t in enumerate(travel_times):
+        if t > 0 and t < 1:  # If travel time is less than 1 minute
+            print(f"Warning: Unrealistically short travel time ({t:.2f} min) for segment {i}")
+            # Use Google Maps API to get a more accurate time if available
+            if i < len(route) - 1 and GOOGLE_MAPS_API:
+                try:
+                    from_loc = locations[route[i]]
+                    to_loc = locations[route[i + 1]]
+                    mode = travel_modes[i] if travel_modes and i < len(travel_modes) else 'driving'
+                    print(f"Fetching accurate travel time from Google Maps for {from_loc} to {to_loc}")
+                    directions = gmaps.directions(from_loc, to_loc, mode=mode)
+                    if directions and len(directions) > 0:
+                        accurate_time = directions[0]['legs'][0]['duration']['value'] / 60.0
+                        print(f"Google Maps travel time: {accurate_time:.2f} minutes")
+                        travel_times[i] = accurate_time
+                except Exception as e:
+                    print(f"Error getting accurate travel time: {e}")
+
     # Map internal mode names to user-friendly names
     mode_display_names = {
         'car': 'Driving',
@@ -231,6 +279,55 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             # Get user-friendly name for the transit mode
             display_mode = mode_display_names.get(best_mode, 'car')
             
+            # Calculate travel time for this task
+            travel_time = 0
+            if GOOGLE_MAPS_API:
+                try:
+                    print(f"\nCalculating travel time for fixed task: {task.title}")
+                    print(f"From: {home_address}")
+                    print(f"To: {location.address}")
+                    print(f"Mode: {best_mode}")
+                    
+                    # Ensure we're using a valid mode for Google Maps
+                    gmaps_mode = best_mode
+                    if best_mode == 'bike':
+                        gmaps_mode = 'bicycling'  # Google Maps uses 'bicycling' instead of 'bike'
+                    elif best_mode == 'bus_train':
+                        gmaps_mode = 'transit'    # Google Maps uses 'transit' instead of 'bus_train'
+                    
+                    directions = gmaps.directions(
+                        home_address,
+                        location.address,
+                        mode=gmaps_mode
+                    )
+                    if directions and len(directions) > 0:
+                        raw_duration = directions[0]['legs'][0]['duration']['value']
+                        travel_time = raw_duration / 60.0  # Convert to minutes
+                        print(f"Raw duration: {raw_duration} seconds")
+                        print(f"Calculated travel time: {travel_time:.2f} minutes")
+                    else:
+                        print("No directions found, using fallback calculation")
+                        # Fallback to distance-based calculation if no directions
+                        if location and home_loc:
+                            # Rough estimate: 1 km = 2 minutes by car, 4 minutes by bike, 12 minutes walking
+                            distance_km = ((location.latitude - home_loc.latitude) ** 2 + 
+                                         (location.longitude - home_loc.longitude) ** 2) ** 0.5 * 111
+                            if best_mode == 'car':
+                                travel_time = distance_km * 2
+                            elif best_mode == 'bike':
+                                travel_time = distance_km * 4
+                            else:  # walking
+                                travel_time = distance_km * 12
+                            print(f"Fallback travel time: {travel_time:.2f} minutes")
+                except Exception as e:
+                    print(f"Error calculating travel time for {task.title}: {e}")
+                    # Use fallback calculation on error
+                    if location and home_loc:
+                        distance_km = ((location.latitude - home_loc.latitude) ** 2 + 
+                                     (location.longitude - home_loc.longitude) ** 2) ** 0.5 * 111
+                        travel_time = distance_km * 2  # Default to car speed
+                        print(f"Fallback travel time after error: {travel_time:.2f} minutes")
+            
             sched = ScheduledTask(
                 user_id=user.user_id,
                 raw_task_id=task.raw_task_id,
@@ -241,7 +338,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 scheduled_end_time=task.end_time,
                 status="pending",
                 priority=task.priority,
-                travel_eta_minutes=0,
+                travel_eta_minutes=travel_time,
                 transit_mode=best_mode  # Store canonical value
             )
             print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
@@ -268,6 +365,12 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         else:
             print(f"Task {raw.title}: No transit mode available, using default")
 
+        # Get travel time for this task
+        travel_time = travel_times[i-1] if i > 0 else 0
+        print(f"\nFlexible task: {raw.title}")
+        print(f"Using travel time: {travel_time:.2f} minutes")
+        print(f"Transit mode: {transit_mode if transit_mode else default_mode}")
+        
         # Map internal mode names to user-friendly names
         mode_display_names = {
             'car': 'Driving',
@@ -290,7 +393,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             scheduled_end_time=et,
             status="pending",
             priority=raw.priority,
-            travel_eta_minutes=0,
+            travel_eta_minutes=travel_time,
             transit_mode=transit_mode if transit_mode else default_mode  # Store canonical value
         )
         db.session.add(sched)

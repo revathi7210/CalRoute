@@ -177,7 +177,10 @@ def parse_and_store_tasks(user):
         from website.llm_utils import call_gemini_for_place_type, get_nearest_location_from_maps
         if not location:
             generic_place   = call_gemini_for_place_type(task_title, home_address)
-            suggested_place = get_nearest_location_from_maps(home_address, generic_place)
+            if generic_place == "home" or "house":
+                suggested_place = home_address
+            else:
+                suggested_place = get_nearest_location_from_maps(home_address, generic_place)
             if suggested_place:
                 # find or insert in DB
                 user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
