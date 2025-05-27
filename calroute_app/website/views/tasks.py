@@ -591,8 +591,9 @@ def toggle_task_completion(task_id):
         db.session.commit()
 
         # Get user and run optimization for remaining tasks
-        user = User.query.get(user_id)
-        run_optimization(user)
+        #DO NOT RUN OPTIMIZATION HERE
+        #user = User.query.get(user_id)
+        #run_optimization(user)
 
         return jsonify({
             "message": "Task status changed successfully",
