@@ -229,7 +229,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             print(f"Final mode for {task.title}: {best_mode}")
             
             # Get user-friendly name for the transit mode
-            display_mode = mode_display_names.get(best_mode, 'Driving')
+            display_mode = mode_display_names.get(best_mode, 'car')
             
             sched = ScheduledTask(
                 user_id=user.user_id,
@@ -242,7 +242,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 status="pending",
                 priority=task.priority,
                 travel_eta_minutes=0,
-                transit_mode=display_mode  # Add transit mode
+                transit_mode=best_mode  # Store canonical value
             )
             print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
             db.session.add(sched)
@@ -291,7 +291,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             status="pending",
             priority=raw.priority,
             travel_eta_minutes=0,
-            transit_mode=display_mode  # Store the selected transit mode
+            transit_mode=transit_mode if transit_mode else default_mode  # Store canonical value
         )
         db.session.add(sched)
 
