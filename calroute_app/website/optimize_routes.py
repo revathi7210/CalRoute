@@ -239,7 +239,6 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 location_id=task.location_id,
                 scheduled_start_time=task.start_time,
                 scheduled_end_time=task.end_time,
-                status="pending",
                 priority=task.priority,
                 travel_eta_minutes=0,
                 transit_mode=display_mode  # Add transit mode
@@ -288,7 +287,6 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             location_id=raw.location_id,
             scheduled_start_time=st,
             scheduled_end_time=et,
-            status="pending",
             priority=raw.priority,
             travel_eta_minutes=0,
             transit_mode=display_mode  # Store the selected transit mode

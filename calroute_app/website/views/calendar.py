@@ -6,6 +6,7 @@ from flask import Blueprint
 from website.extensions import db
 from website.models import RawTask, Location
 from website.google_maps_helper import geocode_address
+from website.location_utils import extract_place_name
 
 calendar_bp = Blueprint('calendar', __name__)
 
@@ -67,6 +68,7 @@ def fetch_google_calendar_events(user):
                 location_obj = Location.query.filter_by(latitude=lat, longitude=lng).first()
                 if not location_obj:
                     location_obj = Location(
+                        name=extract_place_name(loc_name),  # Extract just the place name
                         address=loc_name,
                         latitude=lat,
                         longitude=lng

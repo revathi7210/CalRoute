@@ -1,12 +1,14 @@
 from flask import Blueprint, jsonify, session, current_app, request
 from website.extensions import db
 from website.models import User, ScheduledTask, Location, RawTask
+from website.location_utils import extract_place_name
 from website.views.calendar import fetch_google_calendar_events
 from website.views.todoist import parse_and_store_tasks
 from website.optimize_routes import run_optimization
 from datetime import datetime, timezone
 from sqlalchemy import and_
 from website.google_maps_helper import geocode_address
+from website.location_resolver import handle_task_mutation
 from website.views.core import get_current_time_pst
 
 tasks_bp = Blueprint('tasks', __name__)
@@ -118,6 +120,7 @@ def create_task():
         
         if not location:
             location = Location(
+                name=extract_place_name(location_str),  # Extract just the place name
                 address=location_str,
                 latitude=lat,
                 longitude=lng
@@ -175,20 +178,35 @@ def create_task():
             priority=data.get("priority", 3),
             duration=data.get("duration", 45),
             status="not_completed",
-            location_id=location_id
+            location_id=location_id,
+            is_location_flexible=False,
+            place_type=None
         )
 
         db.session.add(raw_task)
         db.session.commit()
         
-        # Run optimization to schedule the new task
-        user = User.query.get(user_id)
-        run_optimization(user)
-        
-        # Get the newly created scheduled task
-        scheduled_task = ScheduledTask.query.filter_by(raw_task_id=raw_task.raw_task_id).first()
-        if not scheduled_task:
-            return jsonify({"error": "Task created but not scheduled"}), 500
+        try:
+           # Run the optimization pipeline
+           current_app.logger.info(f"Starting optimization for user {user_id} after task creation")
+           handle_task_mutation(user_id)
+           current_app.logger.info("Optimization completed successfully")
+          
+           # Return updated scheduled tasks
+           return get_scheduled_tasks()
+        except Exception as opt_error:
+           # If optimization fails, we still created the task successfully
+           # Log the error but return success to the user
+           current_app.logger.error(f"Optimization error: {str(opt_error)}")
+           current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+          
+           return jsonify({
+               "message": "Task created successfully, but schedule optimization failed",
+               "task_id": raw_task.raw_task_id,
+               "title": raw_task.title,
+               "optimization_error": str(opt_error)
+           })
+
 
         # Return the newly created task with all its details
         return jsonify({
@@ -280,6 +298,7 @@ def update_task(task_id):
 
             if existing_location:
                 # Update existing location
+                existing_location.name = extract_place_name(location_name)  # Update with extracted place name
                 existing_location.address = location_name
                 existing_location.latitude = lat
                 existing_location.longitude = lng
@@ -287,6 +306,7 @@ def update_task(task_id):
             else:
                 # Create new location
                 location = Location(
+                    name=extract_place_name(location_name),  # Extract just the place name
                     address=location_name,
                     latitude=lat,
                     longitude=lng
@@ -300,24 +320,28 @@ def update_task(task_id):
         # Commit the initial changes
         db.session.commit()
 
-        # Run optimization to update the schedule
         try:
-            # Delete all scheduled tasks for this user to ensure clean slate
-            ScheduledTask.query.filter_by(user_id=user_id).delete()
-            db.session.commit()
+           # Run the optimization pipeline
+           current_app.logger.info(f"Starting optimization for user {user_id} after task creation")
+           handle_task_mutation(user_id)
+           current_app.logger.info("Optimization completed successfully")
+          
+           # Return updated scheduled tasks
+           return get_scheduled_tasks()
+        except Exception as opt_error:
+           # If optimization fails, we still created the task successfully
+           # Log the error but return success to the user
+           current_app.logger.error(f"Optimization error: {str(opt_error)}")
+           current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+          
+           return jsonify({
+               "message": "Task created successfully, but schedule optimization failed",
+               "task_id": raw_task.raw_task_id,
+               "title": raw_task.title,
+               "optimization_error": str(opt_error)
+           })
 
-            # Run optimization to create new scheduled tasks for all tasks
-            run_optimization(user)
-            db.session.commit()
-
-            # Verify that scheduled tasks were created
-            scheduled_tasks = ScheduledTask.query.filter_by(user_id=user_id).all()
-            if not scheduled_tasks:
-                current_app.logger.warning(f"No scheduled tasks created after optimization for user {user_id}")
-        except Exception as e:
-            current_app.logger.error(f"Error updating schedule: {str(e)}")
-            # Don't rollback the task update if optimization fails
-            pass
+        # Run optimization to update the schedule
 
         # Fetch the updated task with its location relationship
         updated_task = (
@@ -400,14 +424,27 @@ def delete_task(raw_task_id):
         db.session.commit()
         
         # Re-run optimization to update the schedule
-        user = User.query.get(user_id)
-        if not user:
-            current_app.logger.error(f"Delete task failed: User {user_id} not found after deletion")
-            return jsonify({"error": "User not found"}), 404
+        try:
+           # Run the optimization pipeline
+           current_app.logger.info(f"Starting optimization for user {user_id} after task creation")
+           handle_task_mutation(user_id)
+           current_app.logger.info("Optimization completed successfully")
+          
+           # Return updated scheduled tasks
+           return get_scheduled_tasks()
+        except Exception as opt_error:
+           # If optimization fails, we still created the task successfully
+           # Log the error but return success to the user
+           current_app.logger.error(f"Optimization error: {str(opt_error)}")
+           current_app.logger.error(f"Optimization stack trace: {traceback.format_exc()}")
+          
+           return jsonify({
+               "message": "Task created successfully, but schedule optimization failed",
+               "task_id": raw_task.raw_task_id,
+               "title": raw_task.title,
+               "optimization_error": str(opt_error)
+           })
 
-        current_app.logger.info(f"Running optimization after task deletion")
-        run_optimization(user)
-        db.session.commit()
         
         current_app.logger.info(f"Successfully deleted raw task {raw_task_id} and updated schedule")
         return jsonify({"message": "Task deleted successfully"})
