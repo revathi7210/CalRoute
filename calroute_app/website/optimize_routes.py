@@ -199,20 +199,10 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
 
     today = datetime.now().date()
 
-    # Map internal mode names to user-friendly names
-    mode_display_names = {
-        'car': 'Driving',
-        'bike': 'Biking',
-        'bus_train': 'Public Transit',
-        'walking': 'Walking',
-        'rideshare': 'Rideshare'
-    }
-    
     # Choose a default transit mode (first one available)
     default_mode = list(user_transit_modes)[0] if user_transit_modes else 'car'
-    default_display_mode = mode_display_names.get(default_mode, 'Driving')
     print(f"\n💾 Available transit modes: {user_transit_modes}")
-    print(f"🚗 Using default transit mode: {default_display_mode}")
+    print(f"🚗 Using default transit mode: {default_mode}")
     
     # Schedule fixed-time tasks first with transit modes
     for task, location in tasks_with_locations:
@@ -276,9 +266,6 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             
             print(f"Final mode for {task.title}: {best_mode}")
             
-            # Get user-friendly name for the transit mode
-            display_mode = mode_display_names.get(best_mode, 'Driving')
-            
             sched = ScheduledTask(
                 user_id=user.user_id,
                 raw_task_id=task.raw_task_id,
@@ -289,12 +276,12 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 scheduled_end_time=task.end_time,
                 priority=task.priority,
                 travel_eta_minutes=0,
-                transit_mode=display_mode  # Add transit mode
+                transit_mode=best_mode if best_mode else default_mode  # Store canonical value
             )
             # Add this calendar event to the scheduled slots to prevent overlap
             scheduled_slots.append((task.start_time, task.end_time, task.title))
 
-            print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
+            print(f"Fixed-time task {task.title} scheduled with transit mode: {best_mode}")
             db.session.add(sched)
 
     # Schedule flexible tasks based on the optimized route
@@ -414,18 +401,6 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             transit_mode = default_mode
             print(f"Task {raw.title}: Using default transit mode: {transit_mode}")
 
-        # Map internal mode names to user-friendly names
-        mode_display_names = {
-            'car': 'Driving',
-            'bike': 'Biking',
-            'bus_train': 'Public Transit',
-            'walking': 'Walking',
-            'rideshare': 'Rideshare'
-        }
-        
-        # Get user-friendly name for the transit mode
-        display_mode = mode_display_names.get(transit_mode, 'Driving') if transit_mode else 'Driving'
-        
         # Explicitly handle datetime objects to prevent 'not iterable' errors
         try:
             # Make sure start and end times are valid datetime objects
@@ -446,7 +421,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 scheduled_end_time=et,
                 priority=raw.priority,
                 travel_eta_minutes=0,
-                transit_mode=display_mode  # Store the selected transit mode
+                transit_mode=transit_mode if transit_mode else default_mode  # Store canonical value
             )
         except Exception as dt_err:
             print(f"Error handling datetime for task {raw.title}: {dt_err}")
@@ -464,7 +439,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 scheduled_end_time=now + timedelta(minutes=dur),
                 priority=raw.priority,
                 travel_eta_minutes=0,
-                transit_mode=display_mode
+                transit_mode=transit_mode if transit_mode else default_mode  # Store canonical value
             )
         db.session.add(sched)
 
