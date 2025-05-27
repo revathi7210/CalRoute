@@ -10,6 +10,50 @@ import os
 
 optimize_bp = Blueprint("optimize", __name__)
 
+def check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buffer_minutes=15):
+    """
+    Check if a proposed time slot conflicts with any existing scheduled slots.
+    If conflict found, adjusts the time to avoid overlap.
+    
+    Args:
+        start_time: Proposed start time for the task
+        end_time: Proposed end time for the task
+        scheduled_slots: List of tuples (start, end, name) of already scheduled tasks
+        task_name: Name of the task being scheduled
+        buffer_minutes: Buffer time between tasks in minutes
+        
+    Returns:
+        Tuple of (adjusted_start_time, adjusted_end_time, was_adjusted)
+    """
+    original_start = start_time
+    original_end = end_time
+    duration = (end_time - start_time).total_seconds() / 60
+    
+    # Sort slots by start time to ensure we process them in order
+    sorted_slots = sorted(scheduled_slots, key=lambda x: x[0])
+    
+    adjusted = False
+    for slot_start, slot_end, slot_name in sorted_slots:
+        # Check if there's any overlap
+        if start_time < slot_end and end_time > slot_start:
+            print(f"\u26a0\ufe0f Time conflict: {task_name} ({start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}) "
+                  f"conflicts with {slot_name} ({slot_start.strftime('%H:%M')}-{slot_end.strftime('%H:%M')})")
+            
+            # Reschedule to start after the conflicting slot
+            start_time = slot_end + timedelta(minutes=buffer_minutes)
+            end_time = start_time + timedelta(minutes=duration)
+            adjusted = True
+            print(f"\u21aa\ufe0f Adjusted to {start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}")
+            
+            # We need to check against all other slots again
+            return check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buffer_minutes)
+    
+    if adjusted:
+        print(f"\u2705 Final schedule for {task_name}: {start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')} "
+              f"(originally {original_start.strftime('%H:%M')}-{original_end.strftime('%H:%M')})")
+    
+    return start_time, end_time, adjusted
+
 # ... (existing routes) ...
 
 def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
@@ -24,6 +68,9 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     """
     print(f"Starting optimization for user {user.user_id}")
     print(f"Sync mode: {sync_mode}")
+    
+    # Track all scheduled time slots to prevent overlaps
+    scheduled_slots = []
     
     from .views.calendar import fetch_google_calendar_events
     from .views.todoist import parse_and_store_tasks
@@ -164,7 +211,8 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     # Choose a default transit mode (first one available)
     default_mode = list(user_transit_modes)[0] if user_transit_modes else 'car'
     default_display_mode = mode_display_names.get(default_mode, 'Driving')
-    print(f"Using default transit mode: {default_display_mode}")
+    print(f"\n💾 Available transit modes: {user_transit_modes}")
+    print(f"🚗 Using default transit mode: {default_display_mode}")
     
     # Schedule fixed-time tasks first with transit modes
     for task, location in tasks_with_locations:
@@ -243,6 +291,9 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 travel_eta_minutes=0,
                 transit_mode=display_mode  # Add transit mode
             )
+            # Add this calendar event to the scheduled slots to prevent overlap
+            scheduled_slots.append((task.start_time, task.end_time, task.title))
+            
             print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
             db.session.add(sched)
 
@@ -259,13 +310,109 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         st = datetime.combine(today, time(mins // 60, mins % 60))
         et = st + timedelta(minutes=dur)
         
-        # Get the transit mode for this task (from previous location)
+        # Check if this task conflicts with any previously scheduled tasks
+        # and adjust the time if needed
+        st, et, was_adjusted = check_and_adjust_time(st, et, scheduled_slots, raw.title)
+        
+        # Get the transit mode for this task based on distance and user preferences
         transit_mode = None
-        if i > 0 and travel_modes and i-1 < len(travel_modes):  # Not the first task and within travel_modes bounds
-            transit_mode = travel_modes[i-1]
-            print(f"Task {raw.title}: Using transit mode {transit_mode}")
-        else:
-            print(f"Task {raw.title}: No transit mode available, using default")
+        location = None
+        
+        # First get the location object for this task
+        if raw.location_id:
+            location = Location.query.filter_by(location_id=raw.location_id).first()
+        
+        # Choose transit mode based on distance from home to this location
+        if location:
+            try:
+                # Get keywords from the address and title for special cases
+                address_lower = location.address.lower() if location.address else ""
+                title_lower = raw.title.lower() if raw.title else ""
+                
+                # Force driving for airport, long distances, or certain keywords
+                if ('airport' in address_lower or 'airport' in title_lower or
+                    any(keyword in address_lower for keyword in ['santa ana', 'tustin', 'newport', 'costa mesa', 'irvine'])):
+                    
+                    force_mode = 'car'
+                    print(f"FORCING DRIVING MODE for likely far location: {location.address}")
+                    
+                    if force_mode in user_transit_modes:
+                        transit_mode = force_mode
+                    else:
+                        transit_mode = default_mode
+                else:
+                    # Calculate distance from home to this location
+                    print(f"\n🗺️ Calculating distance for {raw.title} from {home_address} to {location.address}")
+                    print(f"GOOGLE_MAPS_API available: {GOOGLE_MAPS_API is not None}")
+                    
+                    if GOOGLE_MAPS_API:
+                        try:
+                            print(f"Making Google Maps API call for directions...")
+                            directions = gmaps.directions(
+                                home_address,
+                                location.address,
+                                mode="driving"  # Just to get distance
+                            )
+                            print(f"API call completed: {directions is not None}")
+                        except Exception as api_error:
+                            print(f"\u26a0️ Google Maps API error: {api_error}")
+                            directions = None
+                        if directions and len(directions) > 0:
+                            # Extract distance in meters
+                            distance_meters = directions[0]['legs'][0]['distance']['value']
+                            distance = distance_meters / 1000  # km
+                            
+                            print(f"Distance calculation for {raw.title}: {distance:.2f} km")
+                            print(f"📊 Distance threshold: <1km=walking, <5km=biking, >5km=driving")
+                            
+                            # Choose appropriate mode based on distance
+                            if distance < 1 and 'walking' in user_transit_modes:  # Less than 1 km
+                                transit_mode = 'walking'
+                                print(f"Short distance ({distance:.2f} km): selecting walking mode")
+                            elif distance < 5 and 'bike' in user_transit_modes:  # Less than 5 km
+                                transit_mode = 'bike'
+                                print(f"Medium distance ({distance:.2f} km): selecting biking mode")
+                            else:  # Over 5 km - driving
+                                transit_mode = 'car' if 'car' in user_transit_modes else default_mode
+                                print(f"Long distance ({distance:.2f} km): selecting driving mode")
+                        else:
+                            print(f"No directions found for {raw.title}, falling back to keyword analysis")
+                    
+                            # Fallback: Try to intelligently guess the distance based on keywords
+                            keywords_indicating_long_distance = ['airport', 'college', 'university', 'downtown', 'mall', 'beach']
+                            keywords_indicating_medium_distance = ['store', 'shop', 'market', 'restaurant', 'cafe', 'coffee']
+                            keywords_indicating_short_distance = ['nearby', 'local', 'corner', 'neighbor']
+                            
+                            combined_text = (title_lower + ' ' + address_lower).lower()
+                            
+                            # Check for long distance indicators first
+                            if any(keyword in combined_text for keyword in keywords_indicating_long_distance):
+                                transit_mode = 'car' if 'car' in user_transit_modes else default_mode
+                                print(f"Keyword analysis indicates LONG distance for '{raw.title}' - using driving mode")
+                            
+                            # Then check for medium distance indicators
+                            elif any(keyword in combined_text for keyword in keywords_indicating_medium_distance):
+                                transit_mode = 'bike' if 'bike' in user_transit_modes else default_mode
+                                print(f"Keyword analysis indicates MEDIUM distance for '{raw.title}' - using biking mode")
+                            
+                            # Then check for short distance indicators
+                            elif any(keyword in combined_text for keyword in keywords_indicating_short_distance):
+                                transit_mode = 'walking' if 'walking' in user_transit_modes else default_mode
+                                print(f"Keyword analysis indicates SHORT distance for '{raw.title}' - using walking mode")
+                            
+                            # Default to car for any task with no obvious indicators
+                            else:
+                                transit_mode = default_mode
+                                print(f"No distance indicators found for '{raw.title}', using default mode: {default_mode}")
+            except Exception as e:
+                print(f"Error calculating distance for {raw.title}: {e}")
+                # If we get an error, use driving for safety
+                transit_mode = 'car' if 'car' in user_transit_modes else default_mode
+        
+        # Fallback to default mode if no appropriate mode was found
+        if not transit_mode:
+            transit_mode = default_mode
+            print(f"Task {raw.title}: Using default transit mode: {transit_mode}")
 
         # Map internal mode names to user-friendly names
         mode_display_names = {
@@ -320,6 +467,11 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 transit_mode=display_mode
             )
         db.session.add(sched)
+        
+        # Add this task to the scheduled slots to prevent future tasks from overlapping
+        scheduled_slots.append((st, et, raw.title))
+        # Keep the slots sorted by start time
+        scheduled_slots.sort(key=lambda x: x[0])
 
     db.session.commit()
     print("\n✅ Schedule optimized successfully.")

@@ -275,9 +275,16 @@ def build_distance_matrix(locations, modes=["car"]):
             if final_matrix[i][j] == float('inf'):
                 final_matrix[i][j] = 999999  # A large number indicating an impossible route
 
-def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None):
+def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None, task_priorities=None):
     """Solve the Traveling Salesman Problem with time windows.
     Simplified and more robust implementation.
+    
+    Args:
+        distance_matrix: Matrix of travel times between locations
+        task_durations: List of task durations in minutes
+        time_windows: List of time windows [(start, end)] in minutes for each location
+        mode_matrix: Optional matrix of transit modes between locations
+        task_priorities: Optional list of priorities for each task (1=highest, fixed time)
     """
     print("Starting simplified TSP solver")
     print(f"Number of locations: {len(distance_matrix)}")
@@ -314,8 +321,10 @@ def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None):
     
     # Print time windows for debugging
     print(f"Time windows: {time_windows}")
+    if task_priorities:
+        print(f"Task priorities: {task_priorities}")
     
-    # Add time window constraints (more robust version)
+    # Add time window constraints with priority handling
     for location_idx in range(num_locations):
         if location_idx < len(time_windows):
             index = manager.NodeToIndex(location_idx)
@@ -329,9 +338,24 @@ def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None):
             if start_min > end_max:
                 print(f"WARNING: Invalid time window at {location_idx}: {tw}, adjusting")
                 start_min = min(start_min, end_max)
-                
+            
+            # Check if this is a high-priority fixed-time task (like calendar event)
+            is_fixed_time = False
+            if task_priorities and location_idx < len(task_priorities):
+                # Priority 1 is highest - these are fixed-time calendar events
+                if task_priorities[location_idx] == 1:
+                    is_fixed_time = True
+                    print(f"Node {location_idx} is a fixed-time calendar event with strict time window")
+            
             print(f"Setting time window for node {location_idx}: {start_min} to {end_max}")
             time_dimension.CumulVar(index).SetRange(start_min, end_max)
+            
+            # For fixed-time calendar events, make the time window constraints stronger
+            # by adding a higher penalty for deviating from the window
+            if is_fixed_time:
+                # Set very high penalties for violating calendar event time windows
+                time_dimension.SetCumulVarSoftLowerBound(index, start_min, 100000)  # High penalty
+                time_dimension.SetCumulVarSoftUpperBound(index, end_max, 100000)  # High penalty
             
             # Simpler way to handle service times - use minimum slack instead of fixed value
             if location_idx > 0 and location_idx < len(task_durations):  # Skip depot for service time
