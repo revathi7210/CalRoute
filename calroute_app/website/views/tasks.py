@@ -7,6 +7,7 @@ from website.optimize_routes import run_optimization
 from datetime import datetime, timezone
 from sqlalchemy import and_
 from website.google_maps_helper import geocode_address
+from website.views.core import get_current_time_pst
 
 tasks_bp = Blueprint('tasks', __name__)
 
@@ -422,26 +423,23 @@ def get_pending_tasks():
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
 
-    current_time = datetime.now()
-    
-    # Get all tasks that were scheduled before current time and are not completed
+    current_time = get_current_time_pst();
+    # Get all not_completed tasks whose scheduled_end_time is <= current time
     pending_tasks = (
-        db.session.query(ScheduledTask, Location)
+        db.session.query(ScheduledTask, Location, RawTask)
         .join(Location, ScheduledTask.location_id == Location.location_id)
         .join(RawTask, ScheduledTask.raw_task_id == RawTask.raw_task_id)
         .filter(
-            and_(
-                ScheduledTask.user_id == user_id,
-                ScheduledTask.scheduled_end_time < current_time,
-                RawTask.status != "completed"
-            )
+            ScheduledTask.user_id == user_id,
+            ScheduledTask.scheduled_start_time < current_time,
+            RawTask.status != "completed"
         )
         .order_by(ScheduledTask.scheduled_start_time)
         .all()
     )
 
     tasks = []
-    for sched_task, location in pending_tasks:
+    for sched_task, location, raw_task in pending_tasks:
         if not location:
             continue
         tasks.append({
@@ -452,6 +450,11 @@ def get_pending_tasks():
             "end_time": sched_task.scheduled_end_time.strftime("%-I:%M %p"),
             "lat": location.latitude,
             "lng": location.longitude,
+            "location_name": getattr(location, 'name', None),
+            "location_address": getattr(location, 'address', None),
+            "description": getattr(sched_task, 'description', ''),
+            "priority": getattr(sched_task, 'priority', 1),
+            "transit_mode": getattr(sched_task, 'transit_mode', None),
         })
 
     return jsonify({"tasks": tasks})
@@ -466,13 +469,22 @@ def complete_tasks():
     if not data or not isinstance(data.get("task_ids"), list):
         return jsonify({"error": "task_ids array is required"}), 400
 
-    task_ids = data["task_ids"]
-    
+    sched_task_ids = data["task_ids"]
     try:
+        # Map sched_task_ids to raw_task_ids
+        raw_task_ids = [
+            r for (r,) in db.session.query(ScheduledTask.raw_task_id)
+                .filter(ScheduledTask.sched_task_id.in_(sched_task_ids), ScheduledTask.user_id == user_id)
+                .all()
+            if r is not None
+        ]
+        if not raw_task_ids:
+            return jsonify({"error": "No matching raw tasks found for the provided scheduled task ids"}), 400
+
         # Get and update raw tasks
         raw_tasks = RawTask.query.filter(
             and_(
-                RawTask.raw_task_id.in_(task_ids),
+                RawTask.raw_task_id.in_(raw_task_ids),
                 RawTask.user_id == user_id
             )
         ).all()

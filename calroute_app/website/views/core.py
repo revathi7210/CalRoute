@@ -1,5 +1,7 @@
 from flask import Blueprint, render_template, session, jsonify
 from website.models import User
+import pytz
+from datetime import datetime
 
 core = Blueprint('core', __name__)
 
@@ -23,3 +25,9 @@ def me():
         "email": user.email,
         "todoist_token": user.todoist_token or ""
     })
+
+def get_current_time_pst():
+    pacific = pytz.timezone('US/Pacific')
+    current_time = datetime.now(pacific)
+    print(f"Current Pacific time: {current_time.isoformat()}")
+    return current_time
