@@ -53,7 +53,7 @@ Rules:
 Reply with only the place type.
 """
     )
-
+            
     return response.text.strip().lower().replace(" ", "_")
 
 def call_gemini_for_specific_business(task_text, home_address):
@@ -85,13 +85,21 @@ def get_nearest_location_from_maps(home_address, task_text):
 
     # Step 1: Get general place type from LLM
     place_type = call_gemini_for_place_type(task_text, home_address)
+    current_app.logger.info(f"Place type from Gemini: {place_type}")
     mapped_type = PLACE_TYPE_MAPPING.get(place_type, place_type)
+    current_app.logger.info(f"Mapped place type: {mapped_type}")
 
     if mapped_type in VALID_GOOGLE_PLACE_TYPES:
         geocode_result = gmaps.geocode(home_address)
-        if not geocode_result:
+        if not geocode_result or len(geocode_result) == 0:
+            current_app.logger.warning(f"No geocode results found for home address: {home_address}")
             return None
-        latlng = geocode_result[0]['geometry']['location']
+            
+        try:
+            latlng = geocode_result[0]['geometry']['location']
+        except (IndexError, KeyError) as e:
+            current_app.logger.error(f"Error accessing geocode result: {str(e)}")
+            return None
 
         places_result = gmaps.places_nearby(
             location=latlng,
@@ -103,7 +111,7 @@ def get_nearest_location_from_maps(home_address, task_text):
         if results:
             return results[0]["name"]
         else:
-            print("No places found for:", mapped_type)
+            current_app.logger.info("No places found for:", mapped_type)
             return None
     else:
         # Step 2: Fallback — Ask Gemini for a specific business name

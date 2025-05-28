@@ -7,6 +7,7 @@ from website.views.todoist import parse_and_store_tasks
 from website.optimize_routes import run_optimization
 from datetime import datetime, timezone, timedelta
 import pytz
+from flask import current_app
 from sqlalchemy import and_
 from website.google_maps_helper import geocode_address
 from website.location_resolver import handle_task_mutation
