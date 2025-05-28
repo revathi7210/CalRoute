@@ -104,6 +104,14 @@ def create_task():
     if not data or not data.get("title"):
         return jsonify({"error": "Title is required"}), 400
 
+    # Get user's current location if provided
+    user_lat = data.get("user_lat")
+    user_lng = data.get("user_lng")
+    if user_lat is not None and user_lng is not None:
+        current_app.logger.info(f"User location: {user_lat}, {user_lng}")
+        # TODO: Use user location for optimization
+    else:
+        current_app.logger.info("User location not provided")
     # Handle location creation if location string is provided
     location_id = None
     if data.get("location_name") or data.get("location_address"):
@@ -262,6 +270,13 @@ def update_task(task_id):
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No data provided'}), 400
+
+        # Get user's current location if provided
+        user_lat = data.get("user_lat")
+        user_lng = data.get("user_lng")
+        if user_lat is not None and user_lng is not None:
+            current_app.logger.info(f"User location: {user_lat}, {user_lng}")
+            # TODO: Use user location for optimization
 
         # Get user first
         user_id = session.get("user_id")
