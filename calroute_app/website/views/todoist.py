@@ -111,14 +111,19 @@ def parse_and_store_tasks(user):
         task_lower = task_title.lower()
         if place_type == "gym" or any(x in task_lower for x in ['workout', 'exercise', 'gym']):
             gym = preferred_locations.get("gym")
-            return Location.query.get(gym["location_id"])
+            if gym:  # Only try to use gym if it exists in preferences
+                return Location.query.get(gym["location_id"])
+            print("No preferred gym location set, will try to find nearby gym")
+            return None  # Return None to fall through to step 3
 
         if place_type in ["supermarket", "grocery_store"] or any(x in task_lower for x in ['buy', 'shop', 'grocery']):
             for store in preferred_locations.get("grocery_stores", []):
                 if store and can_task_at_preferred(task_title, store["address"]):
                     return Location.query.get(store["location_id"])
+            print("No preferred grocery store found, will try to find nearby store")
+            return None  # Return None to fall through to step 3
 
-        return None
+        return None  # Return None for any other case to fall through to step 3
 
     for line in parsed_tasks:
         match = re.match(r"task=(.*?),\s*location=(.*?),\s*date=(.*?),\s*time=(.*)", line.strip().strip("\""))
@@ -149,7 +154,7 @@ def parse_and_store_tasks(user):
             try:
                 location = resolve_location_for_task(user, location_name, task_title)
             except Exception as e:
-                print(f"Error resolving location: {e}")
+                print(f"Error resolving location {e}")
 
         # 2️⃣ If not, try preferred locations
         if not location and place_type:
