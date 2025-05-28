@@ -6,6 +6,7 @@ from flask import current_app
 from website.extensions import db
 from website.models import RawTask, Location, UserPreference
 from website.location_resolver import resolve_location_for_task
+from website.location_utils import extract_place_name
 from website.google_maps_helper import find_nearest_location
 from todoist_api_python.api import TodoistAPI
 import google.generativeai as genai
@@ -111,15 +112,19 @@ def parse_and_store_tasks(user):
         task_lower = task_title.lower()
         if place_type == "gym" or any(x in task_lower for x in ['workout', 'exercise', 'gym']):
             gym = preferred_locations.get("gym")
-            if gym and can_task_at_preferred(task_title, gym["address"]):
+            if gym:  # Only try to use gym if it exists in preferences
                 return Location.query.get(gym["location_id"])
+            print("No preferred gym location set, will try to find nearby gym")
+            return None  # Return None to fall through to step 3
 
         if place_type in ["supermarket", "grocery_store"] or any(x in task_lower for x in ['buy', 'shop', 'grocery']):
             for store in preferred_locations.get("grocery_stores", []):
                 if store and can_task_at_preferred(task_title, store["address"]):
                     return Location.query.get(store["location_id"])
+            print("No preferred grocery store found, will try to find nearby store")
+            return None  # Return None to fall through to step 3
 
-        return None
+        return None  # Return None for any other case to fall through to step 3
 
     for line in parsed_tasks:
         match = re.match(r"task=(.*?),\s*location=(.*?),\s*date=(.*?),\s*time=(.*)", line.strip().strip("\""))
@@ -141,8 +146,6 @@ def parse_and_store_tasks(user):
         print(f"LLM returned generic_place: {generic_place}")
 
         place_type = generic_place if generic_place else None
-        is_flexible = bool(place_type and place_type in VALID_GOOGLE_PLACE_TYPES)
-
         location = None
 
         # 1️⃣ Use explicitly stated location from task
@@ -150,16 +153,17 @@ def parse_and_store_tasks(user):
             try:
                 location = resolve_location_for_task(user, location_name, task_title)
             except Exception as e:
-                print(f"Error resolving location: {e}")
+                print(f"Error resolving location {e}")
 
         # 2️⃣ If not, try preferred locations
         if not location and place_type:
             location = match_preferred_location(preferred_locations, task_title, place_type)
-
+            current_app.logger.info(f"Matched preferred location: {location}")
+            
         # 3️⃣ If still not found, fallback to Maps + LLM
-        if not location and is_flexible:
+        if not location :
             suggested_place = get_nearest_location_from_maps(home_address, place_type)
-            print(f"Suggested place from maps: {suggested_place}")
+            current_app.logger.info(f"Suggested place from maps: {suggested_place}")
             if suggested_place:
                 user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
                 user_lat = user_lng = None
@@ -183,6 +187,7 @@ def parse_and_store_tasks(user):
                         ).first()
                         if not location:
                             location = Location(
+                                name=extract_place_name(place_data["address"]),
                                 address=place_data["address"],
                                 latitude=place_data["lat"],
                                 longitude=place_data["lng"]
@@ -197,7 +202,7 @@ def parse_and_store_tasks(user):
                                     longitude=place_data["lng"]
                                 ).first()
 
-        print(f"Creating RawTask: title={task_title}, is_flexible={is_flexible}, place_type={place_type}, location_id={location.location_id if location else None}")
+        print(f"Creating RawTask: title={task_title},  place_type={place_type}, location_id={location.location_id if location else None}")
 
         start_time = None
         if date != "none" and time_str != "none":
@@ -216,7 +221,7 @@ def parse_and_store_tasks(user):
             existing_task.start_time = start_time or existing_task.start_time
             existing_task.due_date = start_time or existing_task.due_date
             existing_task.title = task_title
-            existing_task.is_location_flexible = is_flexible
+            existing_task.is_location_flexible = True
             existing_task.place_type = place_type
             db.session.commit()
         else:
@@ -232,13 +237,13 @@ def parse_and_store_tasks(user):
                 priority=1,
                 duration=45,
                 status='not_completed',
-                is_location_flexible=is_flexible,
+                is_location_flexible=True,
                 place_type=place_type
             )
             try:
                 db.session.add(raw_task)
                 db.session.commit()
-                print(f"Committed RawTask: title={task_title}, is_flexible={is_flexible}, place_type={place_type}, location_id={location.location_id if location else None}")
+                print(f"Committed RawTask: title={task_title},  place_type={place_type}, location_id={location.location_id if location else None}")
             except IntegrityError:
                 db.session.rollback()
                 existing_task = RawTask.query.filter_by(
@@ -251,10 +256,10 @@ def parse_and_store_tasks(user):
                     existing_task.start_time = start_time or existing_task.start_time
                     existing_task.due_date = start_time or existing_task.due_date
                     existing_task.title = task_title
-                    existing_task.is_location_flexible = is_flexible
+                    existing_task.is_location_flexible = True
                     existing_task.place_type = place_type
                     db.session.commit()
-                    print(f"Updated existing RawTask after conflict: title={task_title}, is_flexible={is_flexible}, place_type={place_type}, location_id={location.location_id if location else None}")
+                    print(f"Updated existing RawTask after conflict: title={task_title},  place_type={place_type}, location_id={location.location_id if location else None}")
 
 
 def get_today_tasks(todoist_token):
