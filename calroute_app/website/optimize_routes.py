@@ -307,7 +307,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                                 
                                 print(f"Distance calculation result for {task.title}: {distance:.2f} km")
                                 
-                                # Choose appropriate mode based on distance
+                                # Choose mode based on distance
                                 if distance < 1 and 'walking' in user_transit_modes:  # Less than 1 km
                                     best_mode = 'walking'
                                     print(f"Short distance ({distance:.2f} km): selecting walking mode")
@@ -460,8 +460,16 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         # Get the transit mode for this task (from previous location)
         transit_mode = None
         
-        # Check if this task is at an airport location
+        # Ensure we have the location object for this task
         loc = Location.query.filter_by(location_id=raw.location_id).first()
+        if not loc:
+            print(f"Warning: Location not found for task {raw.title} (ID: {raw.location_id})")
+            
+        # Direct handling for shopping and movie tasks - these should always use bike or transit when possible
+        shopping_or_movie = ('shop' in raw.title.lower() or 'clothes' in raw.title.lower() or 
+                             'movie' in raw.title.lower() or 'theater' in raw.title.lower())
+        
+        # Check if this task is at an airport location
         if loc and ('airport' in loc.address.lower() or 'airport' in raw.title.lower()):
             if 'rideshare' in user_transit_modes:
                 transit_mode = 'rideshare'
@@ -469,15 +477,25 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             elif 'car' in user_transit_modes:
                 transit_mode = 'car'
                 print(f"Airport location detected for {raw.title}: using car")
-        # Otherwise use the transit mode from the solver
+        # Special handling for shopping and movie tasks
+        elif shopping_or_movie:
+            if 'bike' in user_transit_modes:
+                transit_mode = 'bike'
+                print(f"Shopping/movie task detected: {raw.title} - using biking mode by default")
+            elif 'bus_train' in user_transit_modes:
+                transit_mode = 'bus_train'
+                print(f"Shopping/movie task detected: {raw.title} - using public transit mode by default")
+        # Otherwise start with transit mode from solver as a suggestion
         elif i > 0 and travel_modes and i-1 < len(travel_modes):  # Not the first task and within travel_modes bounds
             transit_mode = travel_modes[i-1]
-            print(f"Task {raw.title}: Using transit mode {transit_mode}")
+            print(f"Task {raw.title}: Initial transit mode suggestion: {transit_mode}")
         else:
-            print(f"Task {raw.title}: No transit mode available, using default")
+            # No initial suggestion
+            print(f"Task {raw.title}: No initial transit mode available")
             
-        # If we have locations for previous and current tasks, calculate distance to make a better mode decision
-        if not transit_mode and i > 0 and raw.location_id:
+        # Always calculate distance to make a better mode decision if we have locations
+        # This will override any initially suggested transit mode
+        if i > 0 and raw.location_id:  # Previous location exists and current task has a location
             prev_idx = route[i-1]
             if prev_idx > 0 and prev_idx < len(locations):
                 try:
@@ -493,26 +511,45 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                             distance = distance_meters / 1000  # km
                             print(f"Distance for {raw.title}: {distance:.2f} km")
                             
-                            # Choose mode based on distance
-                            if distance < 1 and 'walking' in user_transit_modes:
-                                transit_mode = 'walking'
-                                print(f"Short distance ({distance:.2f} km): using walking")
-                            elif distance < 5 and 'bike' in user_transit_modes:
-                                transit_mode = 'bike'
-                                print(f"Medium distance ({distance:.2f} km): using biking")
-                            elif distance < 12 and 'bus_train' in user_transit_modes:
-                                transit_mode = 'bus_train'
-                                print(f"Medium-long distance ({distance:.2f} km): using public transit")
-                            elif 'rideshare' in user_transit_modes:
-                                transit_mode = 'rideshare'
-                                print(f"Long distance ({distance:.2f} km): using rideshare")
-                            elif 'car' in user_transit_modes:
-                                transit_mode = 'car'
-                                print(f"Long distance ({distance:.2f} km): using driving")
+                            # Special handling for shopping and movie tasks based on user's requirements
+                            if 'clothes' in raw.title.lower() or 'shop' in raw.title.lower() or 'movie' in raw.title.lower() or 'theater' in raw.title.lower():
+                                # For shopping and movie tasks, prioritize bike and bus_train
+                                if distance < 1 and 'walking' in user_transit_modes:
+                                    transit_mode = 'walking'
+                                    print(f"Shopping/movie task with short distance ({distance:.2f} km): using walking")
+                                elif distance < 7 and 'bike' in user_transit_modes:  # Extended bike range for these activities
+                                    transit_mode = 'bike'
+                                    print(f"Shopping/movie task with medium distance ({distance:.2f} km): using biking")
+                                elif 'bus_train' in user_transit_modes:
+                                    transit_mode = 'bus_train'
+                                    print(f"Shopping/movie task with longer distance ({distance:.2f} km): using public transit")
+                                elif 'rideshare' in user_transit_modes:
+                                    transit_mode = 'rideshare' 
+                                    print(f"Shopping/movie task with long distance ({distance:.2f} km): using rideshare")
+                                else:
+                                    transit_mode = default_mode
+                                    print(f"Shopping/movie task: using default mode {transit_mode}")
                             else:
-                                # Fallback to first available mode
-                                transit_mode = default_mode
-                                print(f"Using default mode {transit_mode} for {distance:.2f} km distance")
+                                # Normal distance-based mode selection for other tasks
+                                if distance < 1 and 'walking' in user_transit_modes:
+                                    transit_mode = 'walking'
+                                    print(f"Short distance ({distance:.2f} km): using walking")
+                                elif distance < 5 and 'bike' in user_transit_modes:
+                                    transit_mode = 'bike'
+                                    print(f"Medium distance ({distance:.2f} km): using biking")
+                                elif distance < 12 and 'bus_train' in user_transit_modes:
+                                    transit_mode = 'bus_train'
+                                    print(f"Medium-long distance ({distance:.2f} km): using public transit")
+                                elif 'rideshare' in user_transit_modes:
+                                    transit_mode = 'rideshare'
+                                    print(f"Long distance ({distance:.2f} km): using rideshare")
+                                elif 'car' in user_transit_modes:
+                                    transit_mode = 'car'
+                                    print(f"Long distance ({distance:.2f} km): using driving")
+                                else:
+                                    # Fallback to first available mode
+                                    transit_mode = default_mode
+                                    print(f"Using default mode {transit_mode} for {distance:.2f} km distance")
                 except Exception as e:
                     print(f"Error determining distance-based mode: {e}")
 
