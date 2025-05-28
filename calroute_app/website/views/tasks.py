@@ -305,6 +305,7 @@ def update_task(task_id):
             location_name = data.get('location_name') or data.get('location_address')
             lat = data.get('lat')
             lng = data.get('lng')
+            task.is_location_flexible = False
 
             if lat is not None and lng is not None:
                 # Round coordinates to 3 decimal places (about 100m precision)
@@ -342,7 +343,7 @@ def update_task(task_id):
                     name=extract_place_name(location_name),  # Extract just the place name
                     address=location_name,
                     latitude=lat,
-                    longitude=lng
+                    longitude=lng,
                 )
                 db.session.add(location)
                 db.session.flush()  # Get the location ID
