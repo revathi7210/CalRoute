@@ -75,8 +75,7 @@ def handle_task_mutation(user_id: int) -> None:
             RawTask.user_id == user_id,
             or_(
                 RawTask.is_location_flexible == 1,  # Using 1 for True
-                RawTask.location_id.is_(None),      # Using is_(None) for NULL check
-                RawTask.updated_at >= recent_time   # Recently modified tasks
+                RawTask.location_id.is_(None)  # Recently modified tasks
             )
         ).all()
         
