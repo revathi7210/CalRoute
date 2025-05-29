@@ -1,11 +1,12 @@
-# maps_utils.py
+
+    # maps_utils.py
 import googlemaps
-from ortools.constraint_solver import routing_enums_pb2
-from ortools.constraint_solver import pywrapcp
 import os
 import json
 from datetime import datetime, timedelta
 import time
+import random
+import math
 from concurrent.futures import ThreadPoolExecutor
 
 GOOGLE_MAPS_API = os.environ.get("GOOGLE_MAPS_API_ID")
@@ -79,35 +80,26 @@ MEDIUM_DISTANCE_MODES = ['bicycling', 'transit', 'driving']
 LONG_DISTANCE_MODES = ['driving', 'transit']
 
 def _should_use_mode_for_distance(mode, distance_minutes):
-    """Determine if a mode is appropriate for a given distance."""
+    """Determine if a mode is appropriate for a given distance.
+    This is a less restrictive version that allows more modes to be considered.
+    """
+    # For distance matrix calculation, we'll be less restrictive to allow more options
+    # The final mode selection will happen in the optimizer based on actual distances
+    
+    # Walking only makes sense for short distances
     if mode == 'walking':
-        return distance_minutes <= SHORT_DISTANCE_THRESHOLD
+        return distance_minutes <= SHORT_DISTANCE_THRESHOLD * 1.5  # More lenient
+    
+    # Biking for short to medium distances
     elif mode == 'bicycling':
-        return distance_minutes <= MEDIUM_DISTANCE_THRESHOLD
-    elif mode == 'transit':
-        return distance_minutes >= SHORT_DISTANCE_THRESHOLD
-    elif mode == 'driving':
-        return distance_minutes >= SHORT_DISTANCE_THRESHOLD
-    return True  # Default to using any mode if not specified
-
-def _best_mode_for_distance(mode, duration):
-    """Select the best mode for a given distance."""
-    if duration < 10:  # Approximately 1 km
-        if 'walking' in mode:
-            return 'walking'
-        elif 'bike' in mode:
-            return 'bike'
-        else:
-            return mode
-    elif duration < 30:  # Approximately 5 km
-        if 'bike' in mode:
-            return 'bike'
-        elif 'bus_train' in mode:
-            return 'bus_train'
-        else:
-            return mode
-    else:
-        return mode
+        return distance_minutes <= MEDIUM_DISTANCE_THRESHOLD * 1.5  # More lenient
+    
+    # Transit and driving for most distances except very short ones
+    elif mode in ['transit', 'driving']:
+        return True  # Allow these modes for any distance
+    
+    # Default to using any mode if not specified
+    return True
 
 def _process_mode(locations, mode, mode_mapping, final_matrix, mode_matrix):
     """Process a single transport mode and update the final matrix."""
@@ -131,7 +123,7 @@ def _process_mode(locations, mode, mode_mapping, final_matrix, mode_matrix):
                 if _should_use_mode_for_distance(google_mode, duration):
                     if duration < final_matrix[i][j]:
                         final_matrix[i][j] = duration
-                        mode_matrix[i][j] = _best_mode_for_distance(google_mode, duration)
+                        mode_matrix[i][j] = mode  # Track which mode was fastest
             else:
                 missing_data = True
     
@@ -244,6 +236,41 @@ def build_distance_matrix(locations, modes=["car"]):
     for i in range(num_locations):
         final_matrix[i][i] = 0
     
+    # Replace any remaining infinity values with more reasonable estimates
+    for i in range(num_locations):
+        for j in range(num_locations):
+            if math.isinf(final_matrix[i][j]):
+                # Check for airport in location string to use a reasonable airport travel time
+                loc_i = locations[i].lower() if i < len(locations) else ""
+                loc_j = locations[j].lower() if j < len(locations) else ""
+                
+                if 'airport' in loc_i or 'airport' in loc_j:
+                    # Airport travel time is typically 30-60 minutes
+                    estimate = 45  # 45 minutes as a reasonable airport travel time
+                    print(f"Airport route detected between {i} and {j}, using estimated travel time of {estimate} minutes")
+                else:
+                    # For regular routes, estimate based on nearby routes that worked
+                    estimates = []
+                    for k in range(num_locations):
+                        if k != i and k != j and not math.isinf(final_matrix[i][k]) and not math.isinf(final_matrix[k][j]):
+                            # Route through k is viable
+                            estimates.append(final_matrix[i][k] + final_matrix[k][j])
+                    
+                    if estimates:
+                        # Take the minimum of all viable routes
+                        estimate = min(estimates)
+                        print(f"Estimated travel time between {i} and {j} as {estimate} minutes based on nearby routes")
+                    else:
+                        # Fallback to a more reasonable maximum time (60 minutes)
+                        estimate = 60  # More reasonable fallback (1 hour)
+                        print(f"Warning: No viable route estimates between {i} and {j}, using fallback of {estimate} minutes")
+                
+                final_matrix[i][j] = estimate
+                
+                # Use the first mode in the list for this route as a fallback
+                if len(modes) > 0 and mode_matrix[i][j] == '':
+                    mode_matrix[i][j] = modes[0]
+    
     print("Distance matrix build complete")
     return final_matrix, mode_matrix
     
@@ -294,9 +321,9 @@ def build_distance_matrix(locations, modes=["car"]):
             if final_matrix[i][j] == float('inf'):
                 final_matrix[i][j] = 999999  # A large number indicating an impossible route
 
-def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None, task_priorities=None, preferred_modes=None):
-    """Solve the Traveling Salesman Problem with time windows.
-    Simplified and more robust implementation.
+def solve_tsp_custom(distance_matrix, task_durations, time_windows, mode_matrix=None, task_priorities=None):
+    """A custom TSP solver using simulated annealing to better handle different transit modes.
+    This implementation works well for small to medium sized problems (up to ~20 locations).
     
     Args:
         distance_matrix: Matrix of travel times between locations
@@ -304,439 +331,298 @@ def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None, t
         time_windows: List of time windows [(start, end)] in minutes for each location
         mode_matrix: Optional matrix of transit modes between locations
         task_priorities: Optional list of priorities for each task (1=highest, fixed time)
+    
+    Returns:
+        Tuple of (route, start_times, total_travel_time, travel_modes)
     """
-    print("Starting simplified TSP solver")
-    print(f"Number of locations: {len(distance_matrix)}")
+    import random
+    import math
+    import copy
     
-    # Create routing index manager
-    num_locations = len(distance_matrix)
-    depot = 0  # The starting location (home)
-    num_vehicles = 1  # Just one vehicle/route
-    
-    manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, depot)
-    routing = pywrapcp.RoutingModel(manager)
-    
-    # Pre-calculate all required distances to avoid callback issues
-    print("Pre-calculating distances for all possible routes...")
-    distance_lookup = {}
-    
-    # First create a mapping from indices to nodes
-    index_to_node_map = {}
-    for node in range(num_locations):
-        try:
-            index = manager.NodeToIndex(node)
-            index_to_node_map[index] = node
-        except Exception as e:
-            print(f"Error mapping node {node} to index: {e}")
-    
-    # Now pre-calculate all possible distances between indices
-    for from_idx in range(num_locations * num_vehicles + 10):  # Add some buffer
-        for to_idx in range(num_locations * num_vehicles + 10):  # Add some buffer
-            try:
-                # Try to get the corresponding nodes
-                if from_idx in index_to_node_map and to_idx in index_to_node_map:
-                    from_node = index_to_node_map[from_idx]
-                    to_node = index_to_node_map[to_idx]
-                    
-                    # Check bounds
-                    if 0 <= from_node < len(distance_matrix) and 0 <= to_node < len(distance_matrix[0]):
-                        distance_lookup[(from_idx, to_idx)] = distance_matrix[from_node][to_node]
-                    else:
-                        distance_lookup[(from_idx, to_idx)] = 999999
-                else:
-                    distance_lookup[(from_idx, to_idx)] = 999999
-            except Exception as e:
-                # Just silently use a large value
-                distance_lookup[(from_idx, to_idx)] = 999999
-    
-    # Define a simple callback that uses the pre-calculated distances
-    def time_callback(from_idx, to_idx):
-        try:
-            # Convert to Python int to avoid any C++ type issues
-            from_index = int(from_idx)
-            to_index = int(to_idx)
-            key = (from_index, to_index)
-            
-            # Use the lookup table, with a default if not found
-            return distance_lookup.get(key, 999999)
-        except:
-            # Silent error - just return a default
-            return 999999
-    
-    transit_callback_index = routing.RegisterTransitCallback(time_callback)
-    
-    # Define arc cost
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-    
-    # Add time dimension
-    routing.AddDimension(
-        transit_callback_index,  # transit callback
-        30,     # slack (waiting time)
-        1440,   # maximum time (24 hours in minutes)
-        False,  # don't force start cumul to zero
-        'Time'  # name of dimension
-    )
-    
-    time_dimension = routing.GetDimensionOrDie('Time')
-    
-    # Print time windows for debugging
-    print(f"Time windows: {time_windows}")
-    if task_priorities:
-        print(f"Task priorities: {task_priorities}")
-    
-    # Add time window constraints with priority handling and error checks
-    for location_idx in range(num_locations):
-        try:
-            if location_idx < len(time_windows):
-                # Convert location_idx to a solver index
-                try:
-                    index = manager.NodeToIndex(location_idx)
-                except Exception as e:
-                    print(f"Error converting node {location_idx} to index: {e}")
-                    continue
-                    
-                # Get time window with validation
-                try:
-                    tw = time_windows[location_idx]
-                    # Ensure time window values are valid
-                    start_min = max(0, int(tw[0]))
-                    end_max = min(1440, int(tw[1]))
-                except Exception as e:
-                    print(f"Invalid time window at {location_idx}: {e}, using defaults")
-                    start_min = 480  # 8am default
-                    end_max = 1440   # midnight default
-                
-                # Ensure start_min <= end_max
-                if start_min > end_max:
-                    print(f"WARNING: Invalid time window at {location_idx}: {start_min}-{end_max}, adjusting")
-                    start_min = min(start_min, end_max)
-                
-                # Check if this is a high-priority fixed-time task (like calendar event)
-                is_fixed_time = False
-                if task_priorities and location_idx < len(task_priorities):
-                    try:
-                        # Priority 1 is highest - these are fixed-time calendar events
-                        priority = int(task_priorities[location_idx])
-                        if priority == 1:
-                            is_fixed_time = True
-                            print(f"Node {location_idx} is a fixed-time calendar event with strict time window {start_min}-{end_max}")
-                    except Exception as e:
-                        print(f"Error processing priority for node {location_idx}: {e}")
-                        # Default to non-fixed time
-            
-            try:
-                print(f"Setting time window for node {location_idx}: {start_min} to {end_max}")
-                time_dimension.CumulVar(index).SetRange(start_min, end_max)
-                
-                # For fixed-time calendar events, make the time window constraints stronger
-                # by adding a higher penalty for deviating from the window
-                if is_fixed_time:
-                    try:
-                        # Set very high penalties for violating calendar event time windows
-                        time_dimension.SetCumulVarSoftLowerBound(index, start_min, 100000)  # High penalty
-                        time_dimension.SetCumulVarSoftUpperBound(index, end_max, 100000)  # High penalty
-                    except Exception as e:
-                        print(f"Error setting penalties for fixed-time event {location_idx}: {e}")
-                
-                # Handle service times with error checking
-                if location_idx > 0 and location_idx < len(task_durations):  # Skip depot for service time
-                    try:
-                        # Get task duration with validation
-                        duration = int(task_durations[location_idx])
-                        print(f"Setting minimum slack of {duration} minutes for location {location_idx}")
-                        
-                        # Add service time constraints
-                        try:
-                            time_dimension.SetSpanUpperBoundForVehicle(duration, 0)  # Ensure minimum service time
-                        except Exception as e:
-                            print(f"Error setting span bound for location {location_idx}: {e}")
-                            
-                        # Use soft bound for additional flexibility
-                        try:
-                            time_dimension.SetCumulVarSoftLowerBound(index, start_min + duration, 1000)
-                        except Exception as e:
-                            print(f"Error setting soft lower bound for location {location_idx}: {e}")
-                    except Exception as e:
-                        print(f"Error processing duration for location {location_idx}: {e}")
-            except Exception as e:
-                print(f"Error setting time window for node {location_idx}: {e}")
-        except Exception as e:
-            print(f"Error processing location {location_idx}: {e}")
-            continue
-    
-    # Set first solution heuristic
-    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-    search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_parameters.time_limit.seconds = 10  # Give it up to 10 seconds to find a solution
-    
-    # Set more advanced local search options to help find solutions
-    search_parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_parameters.log_search = True
-    
-    # Solve the problem with error handling
-    print("Solving TSP...")
-    solution = None
-    try:
-        solution = routing.SolveWithParameters(search_parameters)
-    except Exception as e:
-        print(f"Error solving TSP: {e}")
-        import traceback
-        print(f"Solver error traceback: {traceback.format_exc()}")
-    
-    # Check solution and extract data
-    if not solution:
-        print("No solution found for TSP")
-        # Return a fallback solution
-        # Define a default start time (8am in minutes)
-        fallback_start_time = 8 * 60  # 8:00 AM
-        fallback_route = list(range(num_locations))
-        fallback_times = [fallback_start_time + i * 60 for i in range(num_locations)]
+    def calculate_route_cost(route, schedule):
+        """Calculate the cost of a route with its schedule."""
+        # Base cost is the total travel time
+        cost = sum(distance_matrix[route[i]][route[i+1]] for i in range(len(route)-1))
         
-        # Create an intelligent fallback mode selection based on distance if possible
-        fallback_modes = []
-        if preferred_modes and len(preferred_modes) > 0:
-            print(f"Creating fallback modes using preferred modes: {preferred_modes}")
-            # Try to select appropriate modes based on distance between locations
-            # For each segment, choose the most appropriate mode
-            for i in range(len(fallback_route) - 1):
-                from_idx = fallback_route[i]
-                to_idx = fallback_route[i + 1]
+        # Add penalties for time window violations
+        for i, loc_idx in enumerate(route):
+            if i > 0:  # Skip the start depot
+                start_time = schedule[i]
+                tw_start, tw_end = time_windows[loc_idx]
                 
-                # Default to first preferred mode
-                selected_mode = preferred_modes[0]
+                # Penalty for arriving before the window starts
+                if start_time < tw_start:
+                    cost += 100 * (tw_start - start_time)
                 
-                # If we have a distance matrix, use it to determine the appropriate mode
-                if distance_matrix and from_idx < len(distance_matrix) and to_idx < len(distance_matrix[0]):
-                    distance_min = distance_matrix[from_idx][to_idx]
+                # Penalty for arriving after the window ends
+                if start_time > tw_end:
+                    cost += 1000 * (start_time - tw_end)
                     
-                    # Approximate distance in km (assuming average speed of 60 km/h)
-                    # So 1 minute ≈ 1 km
-                    distance_km = distance_min
-                    
-                    # Choose mode based on distance
-                    if distance_km < 1.0 and 'walking' in preferred_modes:
-                        selected_mode = 'walking'
-                        print(f"Fallback - short distance ({distance_km:.2f} km): using walking")
-                    elif distance_km < 5.0 and 'bike' in preferred_modes:
-                        selected_mode = 'bike'
-                        print(f"Fallback - medium distance ({distance_km:.2f} km): using biking")
-                    elif distance_km < 12.0 and 'bus_train' in preferred_modes:
-                        selected_mode = 'bus_train'
-                        print(f"Fallback - medium-long distance ({distance_km:.2f} km): using public transit")
-                    elif 'rideshare' in preferred_modes:
-                        selected_mode = 'rideshare'
-                        print(f"Fallback - longer distance ({distance_km:.2f} km): using rideshare")
-                    else:
-                        # Use first available mode
-                        selected_mode = preferred_modes[0]
-                        print(f"Fallback - using default mode: {selected_mode}")
-                else:
-                    print(f"Fallback - no distance data available, using default mode: {selected_mode}")
-                
-                fallback_modes.append(selected_mode)
-        else:
-            # If no preferred modes specified, default to 'walking' for all segments
-            print("No preferred modes specified, defaulting to 'walking'")
-            fallback_modes = ['walking'] * (len(fallback_route) - 1)
+                # Add priority penalties - fixed time tasks (priority 1) get very high penalties
+                if task_priorities and loc_idx < len(task_priorities):
+                    if task_priorities[loc_idx] == 1 and (start_time < tw_start or start_time > tw_end):
+                        cost += 10000  # Huge penalty for fixed-time tasks
+        
+        return cost
+    
+    def create_schedule(route):
+        """Create a schedule (start times) for a given route."""
+        schedule = [0] * len(route)  # Initialize with zeros
+        current_time = time_windows[route[0]][0]  # Start at the earliest time for depot
+        
+        for i in range(1, len(route)):
+            prev_idx = route[i-1]
+            curr_idx = route[i]
             
-        print(f"Using fallback route: {fallback_route}")
-        print(f"Using fallback modes: {fallback_modes}")
-        return fallback_route, fallback_times, 0, fallback_modes
+            # Travel time from previous to current
+            travel_time = distance_matrix[prev_idx][curr_idx]
+            
+            # Handle infinite travel time
+            if math.isinf(travel_time):
+                print(f"Warning: Infinite travel time detected in schedule between {prev_idx} and {curr_idx}")
+                # More reasonable estimate for travel time
+                if 'airport' in str(route).lower():
+                    travel_time = 45  # 45 minutes for airport routes
+                    print(f"Using estimated airport travel time of {travel_time} minutes")
+                else:
+                    travel_time = 60  # 1 hour for other routes
+                    print(f"Using estimated travel time of {travel_time} minutes")
+            
+            # Add service time for previous location (if it's not the depot)
+            if i > 1:  # Skip service time for depot
+                service_time = task_durations[prev_idx]
+                current_time += service_time
+            
+            # Travel to next location
+            current_time += travel_time
+            
+            # Ensure we respect the earliest start time window
+            tw_start, _ = time_windows[curr_idx]
+            if current_time < tw_start:
+                current_time = tw_start
+            
+            schedule[i] = current_time
+        
+        return schedule
     
-    print("TSP solution found!")
+    print("\n🔍 Starting custom TSP solver with simulated annealing")
+    print(f"📍 Number of locations: {len(distance_matrix)}")
     
-    # Extract solution info
-    route = []
-    start_times = []
+    # Log the distance matrix for debugging (truncated for readability)
+    print("\n📊 Distance Matrix (sample):")
+    for i in range(min(3, len(distance_matrix))):
+        print(f"  Location {i}: {[round(d, 1) if not math.isinf(d) else 'inf' for d in distance_matrix[i][:min(5, len(distance_matrix))]]}") 
+    
+    # Log time windows
+    print("\n🕓 Time Windows (first 5):")
+    for i in range(min(5, len(time_windows))):
+        print(f"  Location {i}: {time_windows[i]}")
+    
+    num_locations = len(distance_matrix)
+    
+    # Create initial route: start at depot (0), visit all locations, return to depot
+    initial_route = [0] + list(range(1, num_locations-1)) + [num_locations-1]
+    
+    # If only 2 locations (start and end), return direct route
+    if num_locations <= 2:
+        schedule = create_schedule(initial_route)
+        total_time = sum(distance_matrix[initial_route[i]][initial_route[i+1]] 
+                         for i in range(len(initial_route)-1))
+        
+        if mode_matrix:
+            travel_modes = [mode_matrix[initial_route[i]][initial_route[i+1]] 
+                           for i in range(len(initial_route)-1)]
+        else:
+            travel_modes = None
+            
+        return initial_route, schedule, total_time, travel_modes
+    
+    # Simulated annealing parameters
+    temperature = 1000.0
+    cooling_rate = 0.95
+    min_temperature = 1e-6
+    
+    # Initialize with current solution
+    current_route = initial_route.copy()
+    current_schedule = create_schedule(current_route)
+    current_cost = calculate_route_cost(current_route, current_schedule)
+    
+    best_route = current_route.copy()
+    best_schedule = current_schedule.copy()
+    best_cost = current_cost
+    
+    iteration = 0
+    max_iterations = 10000
+    
+    print("\n🧪 TSP optimization parameters:")
+    print(f"  Temperature: {temperature}")
+    print(f"  Cooling rate: {cooling_rate}")
+    print(f"  Max iterations: {max_iterations}")
+    
+    # Start simulated annealing
+    print("\n🔄 Beginning simulated annealing process...")
+    while temperature > min_temperature and iteration < max_iterations:
+        iteration += 1
+        
+        # Select two non-depot positions to swap
+        i = random.randint(1, len(current_route) - 3)
+        j = random.randint(i + 1, len(current_route) - 2)
+        
+        # Create new candidate route by swapping
+        new_route = current_route.copy()
+        new_route[i], new_route[j] = new_route[j], new_route[i]
+        
+        # Calculate new schedule and cost
+        new_schedule = create_schedule(new_route)
+        new_cost = calculate_route_cost(new_route, new_schedule)
+        
+        # Decide whether to accept the new solution
+        cost_diff = new_cost - current_cost
+        if cost_diff < 0 or random.random() < math.exp(-cost_diff / temperature):
+            current_route = new_route
+            current_schedule = new_schedule
+            current_cost = new_cost
+            
+            # Update best solution if this is better
+            if current_cost < best_cost:
+                best_route = current_route.copy()
+                best_schedule = current_schedule.copy()
+                best_cost = current_cost
+                print(f"Found better solution: {best_cost}")
+        
+        # Cool down
+        temperature *= cooling_rate
+        
+        # Print progress occasionally
+        if iteration % 500 == 0:
+            print(f"Iteration {iteration}, Temperature: {temperature:.2f}, Current cost: {current_cost:.2f}, Best cost: {best_cost:.2f}")
+    
+    print(f"\n🏆 TSP optimization completed after {iteration} iterations")
+    print(f"🛣️ Best route: {best_route}")
+    print(f"📅 Best schedule (start times): {best_schedule}")
+    
+    if task_priorities:
+        print("\n⭐ Task priorities:")
+        for i, loc in enumerate(best_route):
+            if loc < len(task_priorities):
+                priority = task_priorities[loc]
+                print(f"  Location {loc}: Priority {priority}")
+    
+    # Calculate and log time window adherence
+    print("\n📋 Time window adherence:")
+    for i, loc in enumerate(best_route):
+        if i > 0:  # Skip depot
+            start = best_schedule[i]
+            tw_start, tw_end = time_windows[loc]
+            status = "✅ On time"
+            if start < tw_start:
+                status = f"⚠️ Early by {tw_start - start} min"
+            elif start > tw_end:
+                status = f"❌ Late by {start - tw_end} min"
+            print(f"  Location {loc}: Scheduled at {start}, Window {tw_start}-{tw_end}, {status}")
+    
+    # Calculate total travel time with protection against infinity values
     total_time = 0
-    travel_modes = None
+    for i in range(len(best_route)-1):
+        travel_time = distance_matrix[best_route[i]][best_route[i+1]]
+        # Replace infinity with a large but finite number (8 hours in minutes)
+        if math.isinf(travel_time):
+            print(f"Warning: Infinite travel time detected between {best_route[i]} and {best_route[i+1]}")
+            travel_time = 480  # 8 hours in minutes
+        total_time += travel_time
+    
+    # Extract travel modes if provided
     if mode_matrix:
         travel_modes = []
+        for i in range(len(best_route)-1):
+            mode = mode_matrix[best_route[i]][best_route[i+1]]
+            travel_modes.append(mode)
+    else:
+        travel_modes = None
     
-    # Debug info for the solution
-    print(f"Solution status: {routing.status()}")  # 0 means ROUTING_SUCCESS
+    print(f"\n🎯 TSP solution found with total travel time: {total_time} minutes")
     
-    # First, clear any duplicate locations (like home appearing twice)
-    processed_nodes = set()
-    cleaned_route = []
+    # Log transit modes if available
+    if travel_modes:
+        print("\n🚗 Selected transit modes for each leg of the journey:")
+        for i in range(len(best_route)-1):
+            from_loc = best_route[i]
+            to_loc = best_route[i+1]
+            mode = travel_modes[i]
+            travel_time = distance_matrix[from_loc][to_loc]
+            if math.isinf(travel_time):
+                travel_time = "estimated"
+            print(f"  From {from_loc} to {to_loc}: {mode} ({travel_time} min)")
     
-    index = routing.Start(0)
-    prev_index = None
-    prev_node = None
+    return best_route, best_schedule, total_time, travel_modes
+
+def solve_tsp(distance_matrix, task_durations, time_windows, mode_matrix=None, task_priorities=None):
+    """Solve the Traveling Salesman Problem with time windows.
+    This function uses a custom simulated annealing solver that works well with different transit modes.
     
-    while not routing.IsEnd(index):
-        node_index = manager.IndexToNode(index)
+    Args:
+        distance_matrix: Matrix of travel times between locations
+        task_durations: List of task durations in minutes
+        time_windows: List of time windows [(start, end)] in minutes for each location
+        mode_matrix: Optional matrix of transit modes between locations
+        task_priorities: Optional list of priorities for each task (1=highest, fixed time)
+    
+    Returns:
+        Tuple of (route, start_times, total_travel_time, travel_modes)
+    """
+    # Log the input parameters
+    print("\n🧩 TSP SOLVER STARTED")
+    print(f"🔢 Problem size: {len(distance_matrix)} locations")
+    print(f"⏱️ Task durations: {task_durations}")
+    print(f"🚗 Transit modes available: {bool(mode_matrix)}")
+    
+    # Use our custom solver instead of OR-Tools
+    try:
+        print("\n🔄 Using custom TSP solver (simulated annealing)...")
+        route, start_times, total_travel_time, travel_modes = solve_tsp_custom(
+            distance_matrix, 
+            task_durations, 
+            time_windows, 
+            mode_matrix, 
+            task_priorities
+        )
+        print("\n✅ Custom TSP solver completed successfully")
+        print(f"📋 Final route: {route}")
+        print(f"⏰ Start times: {start_times}")
+        print(f"⌛ Total travel time: {total_travel_time} minutes")
+        print(f"🚌 Transit modes selected: {travel_modes}")
+        return route, start_times, total_travel_time, travel_modes
+    except Exception as e:
+        print(f"Custom TSP solver failed: {e}")
+        print("Falling back to basic route...")
         
-        # Skip duplicate consecutive locations (like 0->0)
-        if prev_node is not None and node_index == prev_node:
-            print(f"Skipping duplicate location: {node_index}")
-            index = solution.Value(routing.NextVar(index))
-            continue
-            
-        # Skip if this would create a cycle back to home before visiting all locations
-        if node_index == 0 and len(cleaned_route) < num_locations - 2:  # -2 because we have home at start and end
-            print(f"Skipping premature return to home")
-            index = solution.Value(routing.NextVar(index))
-            continue
+        # Define a fallback solution if the solver fails
+        route = list(range(len(distance_matrix)))
+        start_times = [time_windows[i][0] for i in range(len(distance_matrix))]
         
-        route.append(node_index)
-        cleaned_route.append(node_index)
+        # Calculate travel time with protection against infinity
+        total_travel_time = 0
+        for i in range(len(distance_matrix)-1):
+            travel_time = distance_matrix[i][i+1]
+            if math.isinf(travel_time):
+                print(f"Warning: Infinite travel time in fallback between {i} and {i+1}")
+                
+                # Use more reasonable estimates based on the location type
+                location_i = "" if i >= len(locations) else str(locations[i]).lower()
+                location_i_plus_1 = "" if i+1 >= len(locations) else str(locations[i+1]).lower()
+                
+                if 'airport' in location_i or 'airport' in location_i_plus_1:
+                    travel_time = 45  # 45 minutes for airport routes
+                    print(f"Using estimated airport travel time of {travel_time} minutes")
+                else:
+                    travel_time = 60  # 1 hour for other routes
+                    print(f"Using estimated travel time of {travel_time} minutes")
+            total_travel_time += travel_time
         
-        # Get time info with better error handling
-        time_var = time_dimension.CumulVar(index)
-        try:
-            start_time = solution.Min(time_var)
-            if start_time == 0 and node_index > 0:  # Likely an error for non-home locations
-                print(f"Warning: Zero start time for node {node_index}, using fallback")
-                # Use a fallback value based on previous task + travel time + duration
-                if len(start_times) > 0:
-                    prev_start = start_times[-1]
-                    # Add previous task duration and travel time
-                    if prev_node is not None:
-                        travel_time = distance_matrix[prev_node][node_index]
-                        task_duration = task_durations[prev_node] if prev_node < len(task_durations) else 0
-                        start_time = prev_start + travel_time + task_duration
-                        print(f"Computed fallback start time: {start_time} for node {node_index}")
-        except Exception as e:
-            print(f"Error getting start time for node {node_index}: {e}")
-            # Fallback - assign a reasonable time
-            if len(start_times) > 0:
-                start_time = start_times[-1] + 60  # Add 1 hour as fallback
-            else:
-                start_time = 540  # 9am fallback
-        
-        start_times.append(start_time)
-        
-        # Get travel mode if available with better error handling
         if mode_matrix:
-            next_index = solution.Value(routing.NextVar(index))
-            if not routing.IsEnd(next_index):
-                next_node_index = manager.IndexToNode(next_index)
-                if node_index < len(mode_matrix) and next_node_index < len(mode_matrix[0]):
-                    mode = mode_matrix[node_index][next_node_index]
-                    print(f"Selected mode from {node_index} to {next_node_index}: {mode}")
-                    if not mode:  # If mode is empty, find a suitable default
-                        # Try to use one of the preferred modes
-                        if preferred_modes and len(preferred_modes) > 0:
-                            # Default to first preferred mode
-                            mode = preferred_modes[0]
-                        else:
-                            # Find first non-empty mode in the matrix as default
-                            default_mode = None
-                            for row in mode_matrix:
-                                for m in row:
-                                    if m and m != '':
-                                        default_mode = m
-                                        break
-                                if default_mode:
-                                    break
-                            mode = default_mode if default_mode else "walking"  # Safest default
-                    travel_modes.append(mode)
-                else:
-                    print(f"Mode matrix indices out of range: {node_index}, {next_node_index}")
-                    # Try to use one of the preferred modes
-                    if preferred_modes and len(preferred_modes) > 0:
-                        # Default to first preferred mode
-                        travel_modes.append(preferred_modes[0])
-                    else:
-                        # Find first non-empty mode in the matrix as default
-                        default_mode = None
-                        for row in mode_matrix:
-                            for m in row:
-                                if m and m != '':
-                                    default_mode = m
-                                    break
-                            if default_mode:
-                                break
-                        travel_modes.append(default_mode if default_mode else "walking")
-            else:
-                # Last leg going back to depot
-                # Try to use one of the preferred modes
-                if preferred_modes and len(preferred_modes) > 0:
-                    # Default to first preferred mode
-                    travel_modes.append(preferred_modes[0])
-                else:
-                    # Find first non-empty mode in the matrix as default
-                    default_mode = None
-                    for row in mode_matrix:
-                        for m in row:
-                            if m and m != '':
-                                default_mode = m
-                                break
-                        if default_mode:
-                            break
-                    travel_modes.append(default_mode if default_mode else "walking")
-
-        # Update total travel time
-        if prev_node is not None:
-            leg_time = distance_matrix[prev_node][node_index]
-            print(f"Travel time from {prev_node} to {node_index}: {leg_time} minutes")
-            total_time += leg_time
+            travel_modes = [mode_matrix[i][i+1] if i < len(distance_matrix)-1 else "" 
+                          for i in range(len(distance_matrix)-1)]
         else:
-            print(f"Starting at node {node_index} - no travel time yet")
-
-        # Update previous node for next iteration
-        prev_node = node_index
-        prev_index = index
-        index = solution.Value(routing.NextVar(index))
-
-    # Add the final node (only if it's not already the last node in the route)
-    node_index = manager.IndexToNode(index)
-    if len(route) == 0 or route[-1] != node_index:
-        route.append(node_index)
-        cleaned_route.append(node_index)
-    
-        # Get the time for this final node
-        time_var = time_dimension.CumulVar(index)
-        try:
-            start_time = solution.Min(time_var)
-        except Exception as e:
-            print(f"Error getting final node time: {e}")
-            # Use last time + travel time from previous node
-            if start_times:
-                if prev_node is not None and node_index < len(distance_matrix[0]):
-                    travel_time = distance_matrix[prev_node][node_index]
-                    start_time = start_times[-1] + travel_time
-                else:
-                    start_time = start_times[-1] + 30  # Default 30 min
-            else:
-                start_time = 540  # 9am default
-        
-        start_times.append(start_time)
-    
-    # Ensure transit modes match the route
-    if mode_matrix:
-        # Fix length of transit modes if needed
-        if len(travel_modes) < len(route) - 1:
-            missing_count = len(route) - 1 - len(travel_modes)
-            print(f"Adding {missing_count} missing transit modes")
-            for _ in range(missing_count):
-                travel_modes.append("car")  # Default to car for missing modes
-    
-    # Clean up potentially invalid travel times
-    for i, time in enumerate(start_times):
-        if time < 0 or time > 1440:  # Invalid time (negative or > 24h)
-            print(f"Fixing invalid time at position {i}: {time}")
-            if i > 0:
-                # Base it on previous time + average task duration
-                start_times[i] = start_times[i-1] + 60  # Default 1h
-            else:
-                start_times[i] = 540  # 9am default
-    
-    # If total time is invalid, recalculate
-    if total_time <= 0 or total_time == float('inf'):
-        print("Recalculating total travel time")
-        total_time = 0
-        for i in range(len(route) - 1):
-            from_node = route[i]
-            to_node = route[i+1]
-            if from_node < len(distance_matrix) and to_node < len(distance_matrix[0]):
-                total_time += distance_matrix[from_node][to_node]
-    
-    print(f"Optimal route found: {route}")
-    print(f"Start times: {start_times}")
-    print(f"Total travel time: {total_time} minutes")
-    print(f"Transit modes: {travel_modes}")
-    print("TSP solution complete")
-    
-    return route, start_times, total_time, travel_modes
+            travel_modes = None
+            
+        return route, start_times, total_travel_time, travel_modes
