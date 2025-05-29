@@ -17,7 +17,7 @@ tasks_bp = Blueprint('tasks', __name__)
 
 @tasks_bp.route("/api/tasks", methods=["GET"])
 def get_scheduled_tasks():
-    user_id = session.get("user_id")
+    user_id = session.get("user_id") 
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
 
