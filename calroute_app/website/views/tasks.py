@@ -200,10 +200,13 @@ def create_task():
 
         # Log the times for debugging
         current_app.logger.info(f"Creating task with times: current={datetime.now(timezone.utc)}, start={start_time}, end={end_time}")
-
+        if data.get("priority") == 1:
+            source_type = "google_calendar"
+        else:
+            source_type = "todoist"
         raw_task = RawTask(
             user_id=user_id,
-            source="manual",
+            source=source_type,
             external_id=f"manual-{datetime.now().timestamp()}",
             title=data.get("title"),
             description=data.get("description", ""),
