@@ -36,6 +36,7 @@ class User(db.Model):
 class Location(db.Model):
     __tablename__ = 'locations'
     location_id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=True)  # Added name column
     address = db.Column(db.String(255), nullable=False)
     latitude = db.Column(db.Float, nullable=False)
     longitude = db.Column(db.Float, nullable=False)
@@ -68,7 +69,8 @@ class RawTask(db.Model):
     duration = db.Column(db.Integer, nullable=True)  # in minutes
     status = db.Column(db.Enum('not_completed', 'completed', name='task_status'), default='not_completed', nullable=False)
     imported_at = db.Column(db.DateTime, server_default=db.func.now())
-
+    is_location_flexible = db.Column(db.Boolean, default=False)
+    place_type = db.Column(db.String(100), nullable=True)
 
 class UserPreference(db.Model):
     __tablename__ = 'user_preferences'
@@ -126,7 +128,6 @@ class ScheduledTask(db.Model):
     location_id = db.Column(db.Integer, db.ForeignKey('locations.location_id', ondelete='SET NULL'), nullable=True)
     scheduled_start_time = db.Column(db.DateTime)
     scheduled_end_time = db.Column(db.DateTime)
-    status = db.Column(db.Enum('pending', 'completed', 'cancelled', name='task_status'), default='pending')
     priority = db.Column(db.Integer, default=3)
     travel_eta_minutes = db.Column(db.Float)
     transit_mode = db.Column(db.String(20), nullable=True)  # Store the selected transit mode

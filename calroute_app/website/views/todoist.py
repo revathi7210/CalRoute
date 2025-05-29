@@ -1,16 +1,17 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from flask import current_app
 from website.extensions import db
 from website.models import RawTask, Location, UserPreference
 from website.location_resolver import resolve_location_for_task
+from website.location_utils import extract_place_name
 from website.google_maps_helper import find_nearest_location
-import math
-from website.llm_utils import get_user_preferred_locations, get_user_home_address
 from todoist_api_python.api import TodoistAPI
 import google.generativeai as genai
 from sqlalchemy.exc import IntegrityError
+from website.llm_utils import call_gemini_for_place_type, get_user_home_address, get_nearest_location_from_maps, VALID_GOOGLE_PLACE_TYPES, get_user_preferred_locations
 
 def split_content(content, chunk_size=500):
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
@@ -36,15 +37,6 @@ No extra text. Return '' if nothing matches. Only output the requested data.
         results.append(response.text.strip())
 
     return "\n".join(results)
-
-def haversine(lat1, lng1, lat2, lng2):
-    # returns miles between two lat/lng
-    R = 3958.8  # earth radius in miles
-    φ1, φ2 = math.radians(lat1), math.radians(lat2)
-    Δφ = math.radians(lat2 - lat1)
-    Δλ = math.radians(lng2 - lng1)
-    a = math.sin(Δφ/2)**2 + math.cos(φ1)*math.cos(φ2)*math.sin(Δλ/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def can_task_at_preferred(task_text: str, location_name: str) -> bool:
     print(f"task_text: {task_text}")
@@ -75,7 +67,9 @@ Reply with only "yes" or "no".
     genai.configure(api_key=current_app.config['GOOGLE_GENAI_API_KEY'])
     model = genai.GenerativeModel("gemini-1.5-flash-latest")
     resp = model.generate_content(prompt)
-    return resp.text.strip().lower() == "yes"
+    result = resp.text.strip().lower() == "yes"
+    print(f"LLM check result: {result}")
+    return result
 
 def parse_and_store_tasks(user):
     api = TodoistAPI(user.todoist_token)
@@ -87,7 +81,6 @@ def parse_and_store_tasks(user):
             flat_tasks.extend(item)
         else:
             flat_tasks.append(item)
-
     todoist_lines = []
     for t in flat_tasks:
         due_str = t.due.string if hasattr(t, 'due') and t.due and hasattr(t.due, 'string') and t.due.string else 'None'
@@ -102,7 +95,7 @@ def parse_and_store_tasks(user):
         • date: when it happens (use format 'DD Mon', e.g., '14 Apr') or 'none'\n
         • time: time of day (e.g., '16:00') or 'none'\n\n
         Return one line per task in this exact format:\n
-        "task=..., location=..., date=..., time=...\n\n"
+        \"task=..., location=..., date=..., time=...\n\n\"
         If a value is not mentioned, use 'none'. Only return this structured output — no explanation or extra text.
         Example:
         Input: go to Starbucks at 8 Apr 15:00
@@ -112,83 +105,72 @@ def parse_and_store_tasks(user):
         Output: task=Learn DSA, location=none, date=none, time=none"""
     )
 
-    parsed = parse_gemini(
-        split_content(content_block),
-        parse_description
-    )
+    parsed = parse_gemini(split_content(content_block), parse_description)
     parsed_tasks = parsed.splitlines()
 
-    pref_data = get_user_preferred_locations(user.user_id)
-    home_address = get_user_home_address()
+    def match_preferred_location(preferred_locations, task_title, place_type):
+        task_lower = task_title.lower()
+        if place_type == "gym" or any(x in task_lower for x in ['workout', 'exercise', 'gym']):
+            gym = preferred_locations.get("gym")
+            if gym:  # Only try to use gym if it exists in preferences
+                return Location.query.get(gym["location_id"])
+            print("No preferred gym location set, will try to find nearby gym")
+            return None  # Return None to fall through to step 3
+
+        if place_type in ["supermarket", "grocery_store"] or any(x in task_lower for x in ['buy', 'shop', 'grocery']):
+            for store in preferred_locations.get("grocery_stores", []):
+                if store and can_task_at_preferred(task_title, store["address"]):
+                    return Location.query.get(store["location_id"])
+            print("No preferred grocery store found, will try to find nearby store")
+            return None  # Return None to fall through to step 3
+
+        return None  # Return None for any other case to fall through to step 3
 
     for line in parsed_tasks:
-        match = re.match(
-            r"task=(.*?),\s*location=(.*?),\s*date=(.*?),\s*time=(.*)",
-            line.strip().strip("\""),
-        )
+        match = re.match(r"task=(.*?),\s*location=(.*?),\s*date=(.*?),\s*time=(.*)", line.strip().strip("\""))
         if not match:
             continue
         task_title, location_name, date, time_str = match.groups()
-        external_id = f"{task_title}-{date}-{time_str}"
-
-        existing_task = RawTask.query.filter_by(external_id=external_id).first()
-        if existing_task:
+        if not task_title.strip():
             continue
 
+        external_id = f"{task_title}-{date}-{time_str}"
+        if RawTask.query.filter_by(external_id=external_id).first():
+            continue
+
+        preferred_locations = get_user_preferred_locations(user.user_id)
+        print(f"Got preferred locations: {preferred_locations}")
+
+        home_address = get_user_home_address()
+        generic_place = call_gemini_for_place_type(task_title, home_address)
+        print(f"LLM returned generic_place: {generic_place}")
+
+        place_type = generic_place if generic_place else None
         location = None
+
+        # 1️⃣ Use explicitly stated location from task
         if location_name.lower() != "none":
-            location = resolve_location_for_task(user, location_name, task_title)
-        if not location and pref_data and home_address:
-            user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
-            if user_pref and user_pref.home_location_id:
-                home = Location.query.get(user_pref.home_location_id)
-                home_lat, home_lng = home.latitude, home.longitude
+            try:
+                location = resolve_location_for_task(user, location_name, task_title)
+            except Exception as e:
+                print(f"Error resolving location {e}")
 
-                # Determine which type of locations to check based on task content
-                task_lower = task_title.lower()
-                candidates = []
-                
-                # Check for grocery-related tasks
-                grocery_keywords = {'buy', 'get', 'shop', 'grocery', 'food', 'market', 'store'}
-                if any(keyword in task_lower for keyword in grocery_keywords):
-                    candidates.extend(pref_data.get('grocery_stores', []))
-                
-                # Check for gym-related tasks
-                gym_keywords = {'workout', 'exercise', 'gym', 'train', 'fitness'}
-                if any(keyword in task_lower for keyword in gym_keywords):
-                    if pref_data.get('gym'):
-                        candidates.append(pref_data['gym'])
-
-                # If no specific type matched, check all locations
-                if not candidates:
-                    if pref_data.get('gym'):
-                        candidates.append(pref_data['gym'])
-                    candidates.extend(pref_data.get('grocery_stores', []))
-
-                for loc_entry in candidates:
-                    if not loc_entry:
-                        continue
-                    dist = haversine(home_lat, home_lng,
-                                     loc_entry['latitude'], loc_entry['longitude'])
-                    if dist <= 25 and can_task_at_preferred(task_title, loc_entry['address']):
-                        location = Location.query.get(loc_entry['location_id'])
-                        break
-
-        from website.llm_utils import call_gemini_for_place_type, get_nearest_location_from_maps
-        if not location:
-            generic_place   = call_gemini_for_place_type(task_title, home_address)
-            if generic_place == "home" or "house":
-                suggested_place = home_address
-            else:
-                suggested_place = get_nearest_location_from_maps(home_address, generic_place)
+        # 2️⃣ If not, try preferred locations
+        if not location and place_type:
+            location = match_preferred_location(preferred_locations, task_title, place_type)
+            current_app.logger.info(f"Matched preferred location: {location}")
+            
+        # 3️⃣ If still not found, fallback to Maps + LLM
+        if not location :
+            suggested_place = get_nearest_location_from_maps(home_address, place_type)
+            current_app.logger.info(f"Suggested place from maps: {suggested_place}")
             if suggested_place:
-                # find or insert in DB
                 user_pref = UserPreference.query.filter_by(user_id=user.user_id).first()
+                user_lat = user_lng = None
                 if user_pref and user_pref.home_location_id:
                     home = Location.query.get(user_pref.home_location_id)
-                    user_lat, user_lng = home.latitude, home.longitude
-                else:
-                    user_lat = user_lng = None
+                    if home:
+                        user_lat, user_lng = home.latitude, home.longitude
 
                 if user_lat and user_lng:
                     place_data = find_nearest_location(
@@ -199,50 +181,48 @@ def parse_and_store_tasks(user):
                     )
 
                     if place_data:
-                         # try reusing an existing Location
                         location = Location.query.filter_by(
                             latitude=place_data["lat"],
                             longitude=place_data["lng"]
                         ).first()
                         if not location:
                             location = Location(
+                                name=extract_place_name(place_data["address"]),
                                 address=place_data["address"],
                                 latitude=place_data["lat"],
                                 longitude=place_data["lng"]
                             )
                             db.session.add(location)
                             try:
-                                # flush only this insert
                                 db.session.flush()
                             except IntegrityError:
-                                # another thread/process just inserted it—rollback & re-fetch
                                 db.session.rollback()
                                 location = Location.query.filter_by(
                                     latitude=place_data["lat"],
                                     longitude=place_data["lng"]
                                 ).first()
 
+        print(f"Creating RawTask: title={task_title},  place_type={place_type}, location_id={location.location_id if location else None}")
+
         start_time = None
         if date != "none" and time_str != "none":
             try:
-                start_time = datetime.strptime(
-                    f"{date} {time_str}", "%d %b %H:%M"
-                ).replace(year=datetime.now().year)
+                start_time = datetime.strptime(f"{date} {time_str}", "%d %b %H:%M").replace(year=datetime.now().year)
             except Exception:
                 pass
-        
-        # avoid inserting the same Todoist task twice
+
         existing_task = RawTask.query.filter_by(
             user_id=user.user_id,
             source="todoist",
             external_id=external_id
         ).first()
         if existing_task:
-            # update if location or time changed
             existing_task.location_id = location.location_id if location else existing_task.location_id
             existing_task.start_time = start_time or existing_task.start_time
             existing_task.due_date = start_time or existing_task.due_date
             existing_task.title = task_title
+            existing_task.is_location_flexible = True
+            existing_task.place_type = place_type
             db.session.commit()
         else:
             raw_task = RawTask(
@@ -254,16 +234,18 @@ def parse_and_store_tasks(user):
                 start_time=start_time,
                 end_time=None,
                 due_date=start_time,
-                priority=1,
-                duration=45,  # Default 45 minutes for Todoist tasks
-                status='not_completed'
+                priority=3,
+                duration=45,
+                status='not_completed',
+                is_location_flexible=True,
+                place_type=place_type
             )
             try:
                 db.session.add(raw_task)
                 db.session.commit()
+                print(f"Committed RawTask: title={task_title},  place_type={place_type}, location_id={location.location_id if location else None}")
             except IntegrityError:
                 db.session.rollback()
-                # Try one more time to find the task in case it was created by another request
                 existing_task = RawTask.query.filter_by(
                     user_id=user.user_id,
                     source="todoist",
@@ -274,13 +256,15 @@ def parse_and_store_tasks(user):
                     existing_task.start_time = start_time or existing_task.start_time
                     existing_task.due_date = start_time or existing_task.due_date
                     existing_task.title = task_title
+                    existing_task.is_location_flexible = True
+                    existing_task.place_type = place_type
                     db.session.commit()
+                    print(f"Updated existing RawTask after conflict: title={task_title},  place_type={place_type}, location_id={location.location_id if location else None}")
 
 
 def get_today_tasks(todoist_token):
     try:
-        api = TodoistAPI(todoist_token)
-        tasks = api.get_tasks()  # Use the API to get tasks instead of recursive call
+        tasks = tasks = get_today_tasks(todoist_token)
         today = datetime.now().date()
         today_tasks = []
         for task in tasks:

@@ -4,6 +4,7 @@ from website.models import User, UserPreference, Location, TransitModeOption
 from website.google_maps_helper import geocode_address
 from datetime import datetime, time
 from sqlalchemy import func
+from website.location_utils import extract_place_name
 
 preferences_bp = Blueprint("preferences", __name__)
 
@@ -47,6 +48,7 @@ def get_or_create_location(address):
     # If no existing location found, create new one
     try:
         location = Location(
+            name=extract_place_name(address),
             address=address,
             latitude=lat,
             longitude=lng,

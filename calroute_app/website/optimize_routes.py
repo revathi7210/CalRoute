@@ -7,8 +7,66 @@ from .models import RawTask, ScheduledTask, Location, User, UserPreference
 from .maps_utils import build_distance_matrix, solve_tsp, gmaps, GOOGLE_MAPS_API
 import requests
 import os
+from flask import current_app
 
 optimize_bp = Blueprint("optimize", __name__)
+
+def check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buffer_minutes=15):
+    """
+    Check if a proposed time slot conflicts with any existing scheduled slots.
+    If conflict found, adjusts the time to avoid overlap, and clamps to today.
+    
+    Args:
+        start_time: Proposed start datetime for the task
+        end_time:   Proposed end datetime for the task
+        scheduled_slots: List of tuples (start, end, name) of already scheduled tasks
+        task_name: Name of the task being scheduled
+        buffer_minutes: Buffer time between tasks in minutes
+        
+    Returns:
+        Tuple of (adjusted_start_time, adjusted_end_time, was_adjusted)
+    """
+    # 1) Clamp any "tomorrow" back into today at latest 23:59
+    today = start_time.date()
+    end_of_day = datetime.combine(today, time(23, 59))
+    was_adjusted = False
+
+    if start_time > end_of_day:
+        # push the slot to end exactly at 23:59
+        duration = (end_time - start_time).total_seconds() / 60
+        end_time = end_of_day
+        start_time = end_of_day - timedelta(minutes=duration)
+        was_adjusted = True
+        print(f"⚠️  Clamped {task_name} to today's end: {start_time.time()}–{end_time.time()}")
+
+    # Sort existing slots by start time
+    sorted_slots = sorted(scheduled_slots, key=lambda x: x[0])
+
+    for slot_start, slot_end, slot_name in sorted_slots:
+        # 2) Check for overlap
+        if start_time < slot_end and end_time > slot_start:
+            print(f"⚠️  Conflict: {task_name} ({start_time.time()}–{end_time.time()}) "
+                  f"with {slot_name} ({slot_start.time()}–{slot_end.time()})")
+            
+            # 3) Push start past that slot + buffer
+            duration = (end_time - start_time).total_seconds() / 60
+            start_time = slot_end + timedelta(minutes=buffer_minutes)
+            end_time   = start_time + timedelta(minutes=duration)
+            was_adjusted = True
+            print(f"↪️  Adjusted to {start_time.time()}–{end_time.time()}")
+
+            # 4) **Re-clamp** if that pushed us past midnight
+            if start_time.date() != today or start_time > end_of_day:
+                # same clamp logic as above
+                end_time = end_of_day
+                start_time = end_of_day - timedelta(minutes=duration)
+                print(f"⚠️  Post-adjust clamp for {task_name}: {start_time.time()}–{end_time.time()}")
+
+            # 5) Recurse to check against earlier slots again
+            return check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buffer_minutes)
+
+    current_app.logger.info(f"Final adjusted time for {task_name}: {start_time.time()}–{end_time.time()}")    
+    return start_time, end_time, was_adjusted
 
 # ... (existing routes) ...
 
@@ -24,6 +82,9 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     """
     print(f"Starting optimization for user {user.user_id}")
     print(f"Sync mode: {sync_mode}")
+    
+    # Track all scheduled time slots to prevent overlaps
+    scheduled_slots = []
     
     from .views.calendar import fetch_google_calendar_events
     from .views.todoist import parse_and_store_tasks
@@ -82,36 +143,49 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         # If current time is after 8am, use current time, otherwise start at 8am
         current_minutes = now.hour * 60 + now.minute
         start_minutes = max(current_minutes, default_start_time)
-        time_windows.append((start_minutes, 1440))
+        # clamp end-of-day to 23:59 → minute 1439
+        time_windows.append((start_minutes, 23*60 + 59))
     else:
         locations.append(home_address)
         durations.append(0)
-        time_windows.append((default_start_time, 1440))  # Start at 8am instead of midnight
-
+        # clamp to 23:59 instead of 24:00
+        time_windows.append((default_start_time, 23*60 + 59))
+    # Priority list for tasks (lower number = higher priority)
+    task_priorities = []
+    
     for i, (task, loc) in enumerate(tasks_with_locations):
-        if task.source == 'google_calendar' and task.start_time and task.end_time:
-            continue
-
         locations.append(loc.address if loc else home_address)
         durations.append(task.duration if task.duration else 45)
 
         # If task has a start time, use it; otherwise use default 8am start
         default_start_time = 8 * 60  # 8:00 AM in minutes
         
-        if task.start_time:
+        # Set priority based on source and time constraints
+        if task.source == 'google_calendar' and task.start_time and task.end_time:
+            # Google Calendar events with fixed times get highest priority (1)
+            priority = 1
             start_min = task.start_time.hour * 60 + task.start_time.minute
+            end_min = task.end_time.hour * 60 + task.end_time.minute
+            print(f"Fixed time calendar event: {task.title} with window {start_min}-{end_min}")
         else:
-            start_min = default_start_time
-            
-        end_min = task.end_time.hour * 60 + task.end_time.minute if task.end_time else 24 * 60
+            # Todoist tasks or flexible calendar tasks get lower priority (2)
+            priority = 2
+            if task.start_time:
+                start_min = task.start_time.hour * 60 + task.start_time.minute
+            else:
+                start_min = default_start_time
+                
+            end_min = task.end_time.hour * 60 + task.end_time.minute if task.end_time else 24 * 60
+        
         time_windows.append((start_min, end_min))
+        task_priorities.append(priority)
         task_indices.append(i)
 
     locations.append(home_address)
     durations.append(0)
     # Allow return to home anytime after 8am
     default_start_time = 8 * 60  # 8:00 AM in minutes
-    time_windows.append((default_start_time, 1440))
+    time_windows.append((default_start_time, 23*60 + 59))
 
     # Fetch user's preferred transit modes from preferences
     user_transit_modes = {mode.mode for mode in pref.transit_modes}
@@ -125,15 +199,37 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     print(f"Locations: {locations}")
     print(f"Durations: {durations}")
     print(f"Time Windows: {time_windows}")
+    print(f"Task Priorities: {task_priorities}")
     print(f"Transit Modes: {user_transit_modes}")
     
-    # Pass the mode_matrix to solve_tsp to get transit modes for each segment
+    # Add priorities for home locations (start and end)
+    full_priorities = [3]  # Start location (home/current) with lowest priority
+    full_priorities.extend(task_priorities)
+    full_priorities.append(3)  # End location (home) with lowest priority
+    
+    print(f"Full priorities including home locations: {full_priorities}")
+    
+    # Pass the mode_matrix and task_priorities to solve_tsp
     route, start_times, total_travel_time, travel_modes = solve_tsp(
         distance_matrix, 
         task_durations=durations, 
         time_windows=time_windows,
-        mode_matrix=mode_matrix
+        mode_matrix=mode_matrix,
+        task_priorities=full_priorities
     )
+    
+    # Calculate travel times between locations for each segment of the route
+    travel_times = []
+    for i in range(len(route) - 1):
+        from_idx = route[i]
+        to_idx = route[i + 1]
+        if from_idx < len(distance_matrix) and to_idx < len(distance_matrix[0]):
+            travel_time = distance_matrix[from_idx][to_idx]
+            travel_times.append(travel_time)
+            print(f"Travel leg {i}: From {from_idx} to {to_idx} = {travel_time} minutes")
+        else:
+            travel_times.append(0)
+            print(f"Invalid indices for travel time calculation: {from_idx} to {to_idx}")
     
     print("\n==== ROUTE OPTIMIZATION OUTPUTS ====")
     print(f"Route: {route}")
@@ -151,55 +247,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     db.session.commit()
 
     today = datetime.now().date()
-
-    # Calculate travel times between consecutive locations
-    travel_times = []
-    print("\n==== CALCULATING TRAVEL TIMES ====")
-    for i in range(len(route) - 1):
-        from_idx = route[i]
-        to_idx = route[i + 1]
-        if from_idx < len(distance_matrix) and to_idx < len(distance_matrix[from_idx]):
-            # Get the raw distance in seconds from the matrix
-            raw_distance = distance_matrix[from_idx][to_idx]
-            # Skip if it's the same location (inf or 0 distance)
-            if raw_distance == float('inf') or raw_distance == 0:
-                travel_time = 0
-                print(f"Route segment {i}: {locations[from_idx]} -> {locations[to_idx]}")
-                print(f"  Same location or invalid distance, setting travel time to 0")
-            else:
-                # Convert seconds to minutes
-                travel_time = raw_distance / 60.0
-                print(f"Route segment {i}: {locations[from_idx]} -> {locations[to_idx]}")
-                print(f"  Raw distance: {raw_distance:.2f} seconds")
-                print(f"  Travel time: {travel_time:.2f} minutes")
-                print(f"  Mode: {travel_modes[i] if travel_modes and i < len(travel_modes) else 'unknown'}")
-            travel_times.append(travel_time)
-        else:
-            travel_times.append(0)
-            print(f"Warning: Invalid indices for travel time calculation: from_idx={from_idx}, to_idx={to_idx}")
-
-    print(f"\nAll calculated travel times: {[f'{t:.2f} min' for t in travel_times]}")
-    print(f"Total travel time from segments: {sum(travel_times):.2f} minutes")
-
-    # Verify travel times are reasonable
-    for i, t in enumerate(travel_times):
-        if t > 0 and t < 1:  # If travel time is less than 1 minute
-            print(f"Warning: Unrealistically short travel time ({t:.2f} min) for segment {i}")
-            # Use Google Maps API to get a more accurate time if available
-            if i < len(route) - 1 and GOOGLE_MAPS_API:
-                try:
-                    from_loc = locations[route[i]]
-                    to_loc = locations[route[i + 1]]
-                    mode = travel_modes[i] if travel_modes and i < len(travel_modes) else 'driving'
-                    print(f"Fetching accurate travel time from Google Maps for {from_loc} to {to_loc}")
-                    directions = gmaps.directions(from_loc, to_loc, mode=mode)
-                    if directions and len(directions) > 0:
-                        accurate_time = directions[0]['legs'][0]['duration']['value'] / 60.0
-                        print(f"Google Maps travel time: {accurate_time:.2f} minutes")
-                        travel_times[i] = accurate_time
-                except Exception as e:
-                    print(f"Error getting accurate travel time: {e}")
-
+    
     # Map internal mode names to user-friendly names
     mode_display_names = {
         'car': 'Driving',
@@ -211,166 +259,136 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     
     # Choose a default transit mode (first one available)
     default_mode = list(user_transit_modes)[0] if user_transit_modes else 'car'
-    default_display_mode = mode_display_names.get(default_mode, 'Driving')
-    print(f"Using default transit mode: {default_display_mode}")
+    #default_display_mode = mode_display_names.get(default_mode, 'Driving')
+    print(f"\n💾 Available transit modes: {user_transit_modes}")
+    print(f"🚗 Using default transit mode: {default_mode}")
     
-    # Schedule fixed-time tasks first with transit modes
-    for task, location in tasks_with_locations:
-        if task.source == 'google_calendar' and task.start_time and task.end_time:
-            # Find best transit mode based on distance from home to this location
-            best_mode = default_mode
-            
-            # Force specific modes for certain keywords in the address or title
-            if location:
-                force_mode = None
-                address_lower = location.address.lower() if location.address else ""
-                title_lower = task.title.lower() if task.title else ""
-                
-                # Force driving for airport, long distances
-                if 'airport' in address_lower or 'airport' in title_lower:
-                    force_mode = 'car'
-                    print(f"FORCING DRIVING MODE for airport location: {location.address}")
-                elif any(keyword in address_lower for keyword in ['santa ana', 'tustin', 'newport', 'costa mesa']):
-                    force_mode = 'car'
-                    print(f"FORCING DRIVING MODE for distant location: {location.address}")
-                
-                if force_mode:
-                    if force_mode in user_transit_modes:
-                        best_mode = force_mode
-                    print(f"Applied forced mode {force_mode} for {task.title} at {location.address}")
-                else:
-                    # Calculate distance from home to this location
-                    try:
-                        # Use direct Google Maps API call for this specific route
-                        if GOOGLE_MAPS_API:
-                            directions = gmaps.directions(
-                                home_address,
-                                location.address,
-                                mode="driving"  # Just to get distance
-                            )
-                            if directions and len(directions) > 0:
-                                # Extract distance in meters
-                                distance_meters = directions[0]['legs'][0]['distance']['value']
-                                distance = distance_meters / 1000  # km
-                                
-                                print(f"Distance calculation result for {task.title}: {distance:.2f} km")
-                                
-                                # Choose appropriate mode based on distance
-                                if distance < 1:  # Less than 1 km
-                                    best_mode = 'walking' if 'walking' in user_transit_modes else default_mode
-                                    print(f"Short distance ({distance:.2f} km): selecting walking mode")
-                                elif distance < 5:  # Less than 5 km
-                                    best_mode = 'bike' if 'bike' in user_transit_modes else default_mode
-                                    print(f"Medium distance ({distance:.2f} km): selecting biking mode")
-                                else:  # Over 5 km - driving
-                                    best_mode = 'car' if 'car' in user_transit_modes else default_mode
-                                    print(f"Long distance ({distance:.2f} km): selecting driving mode")
-                            else:
-                                print(f"No directions found for {task.title}, using default mode")
-                    except Exception as e:
-                        print(f"Error calculating distance for {task.title}: {e}")
-                        # If we get an error, use driving for safety
-                        if 'car' in user_transit_modes:
-                            best_mode = 'car'
-                            print(f"Error occurred - defaulting to driving mode for {task.title}")
-            
-            print(f"Final mode for {task.title}: {best_mode}")
-            
-            # Get user-friendly name for the transit mode
-            display_mode = mode_display_names.get(best_mode, 'car')
-            
-            # Calculate travel time for this task
-            travel_time = 0
-            if GOOGLE_MAPS_API:
-                try:
-                    print(f"\nCalculating travel time for fixed task: {task.title}")
-                    print(f"From: {home_address}")
-                    print(f"To: {location.address}")
-                    print(f"Mode: {best_mode}")
-                    
-                    # Ensure we're using a valid mode for Google Maps
-                    gmaps_mode = best_mode
-                    if best_mode == 'bike':
-                        gmaps_mode = 'bicycling'  # Google Maps uses 'bicycling' instead of 'bike'
-                    elif best_mode == 'bus_train':
-                        gmaps_mode = 'transit'    # Google Maps uses 'transit' instead of 'bus_train'
-                    
-                    directions = gmaps.directions(
-                        home_address,
-                        location.address,
-                        mode=gmaps_mode
-                    )
-                    if directions and len(directions) > 0:
-                        raw_duration = directions[0]['legs'][0]['duration']['value']
-                        travel_time = raw_duration / 60.0  # Convert to minutes
-                        print(f"Raw duration: {raw_duration} seconds")
-                        print(f"Calculated travel time: {travel_time:.2f} minutes")
-                    else:
-                        print("No directions found, using fallback calculation")
-                        # Fallback to distance-based calculation if no directions
-                        if location and home_loc:
-                            # Rough estimate: 1 km = 2 minutes by car, 4 minutes by bike, 12 minutes walking
-                            distance_km = ((location.latitude - home_loc.latitude) ** 2 + 
-                                         (location.longitude - home_loc.longitude) ** 2) ** 0.5 * 111
-                            if best_mode == 'car':
-                                travel_time = distance_km * 2
-                            elif best_mode == 'bike':
-                                travel_time = distance_km * 4
-                            else:  # walking
-                                travel_time = distance_km * 12
-                            print(f"Fallback travel time: {travel_time:.2f} minutes")
-                except Exception as e:
-                    print(f"Error calculating travel time for {task.title}: {e}")
-                    # Use fallback calculation on error
-                    if location and home_loc:
-                        distance_km = ((location.latitude - home_loc.latitude) ** 2 + 
-                                     (location.longitude - home_loc.longitude) ** 2) ** 0.5 * 111
-                        travel_time = distance_km * 2  # Default to car speed
-                        print(f"Fallback travel time after error: {travel_time:.2f} minutes")
-            
-            sched = ScheduledTask(
-                user_id=user.user_id,
-                raw_task_id=task.raw_task_id,
-                title=task.title,
-                description=task.description,
-                location_id=task.location_id,
-                scheduled_start_time=task.start_time,
-                scheduled_end_time=task.end_time,
-                status="pending",
-                priority=task.priority,
-                travel_eta_minutes=travel_time,
-                transit_mode=best_mode  # Store canonical value
-            )
-            print(f"Fixed-time task {task.title} scheduled with transit mode: {display_mode}")
-            db.session.add(sched)
+    # Keep track of tasks we've already scheduled to prevent duplicates
+    scheduled_task_ids = set()
+    scheduled_slots = []  # For time conflict checking
+
+    print(f"\nRoute: {route}")
+    print(f"Task indices: {task_indices}")
+    print(f"Locations: {locations}")
 
     # Schedule flexible tasks based on the optimized route
     for i, idx in enumerate(route):
         if idx == 0 or idx == len(locations) - 1:
             continue
 
-        task_idx = task_indices[idx - 1]
+        task_idx = task_indices[idx-1]
         raw, _ = tasks_with_locations[task_idx]
         dur = durations[idx]
 
-        mins = start_times[idx]
-        st = datetime.combine(today, time(mins // 60, mins % 60))
-        et = st + timedelta(minutes=dur)
+        # Skip if we've already scheduled this task
+        if raw.raw_task_id in scheduled_task_ids:
+            print(f"Skipping duplicate task: {raw.title} (ID: {raw.raw_task_id})")
+            continue
+            
+        # Mark this task as scheduled
+        scheduled_task_ids.add(raw.raw_task_id)
         
-        # Get the transit mode for this task (from previous location)
-        transit_mode = None
-        if i > 0 and travel_modes and i-1 < len(travel_modes):  # Not the first task and within travel_modes bounds
-            transit_mode = travel_modes[i-1]
-            print(f"Task {raw.title}: Using transit mode {transit_mode}")
-        else:
-            print(f"Task {raw.title}: No transit mode available, using default")
+        # Get the travel time for this leg of the journey
+        travel_time = 0
+        if i < len(travel_times):
+            travel_time = travel_times[i]
+            print(f"Using travel time {travel_time} minutes for task {raw.title}")
 
-        # Get travel time for this task
-        travel_time = travel_times[i-1] if i > 0 else 0
-        print(f"\nFlexible task: {raw.title}")
-        print(f"Using travel time: {travel_time:.2f} minutes")
-        print(f"Transit mode: {transit_mode if transit_mode else default_mode}")
+        # For Google Calendar events, use their original fixed times
+        if raw.source == 'google_calendar' and raw.start_time and raw.end_time:
+            print(f"Preserving original fixed time for calendar event: {raw.title}")
+            st = datetime.combine(today, raw.start_time.time())
+            et = datetime.combine(today, raw.end_time.time())
+            current_app.logger.info(f"Unadjusted start time for {raw.title}: {st}")
+            current_app.logger.info(f"Unadjusted end time for {raw.title}: {et}")
+        else:
+            # For flexible tasks, use the optimized times from TSP solver
+            mins = start_times[idx]
+            day_offset    = mins // (24*60)                    # how many whole days to skip
+            minute_of_day = mins % (24*60)
+            hour          = minute_of_day // 60
+            minute        = minute_of_day % 60
+
+            st = datetime.combine(today + timedelta(days=day_offset),time(hour, minute))
+            et = st + timedelta(minutes=dur)
+            current_app.logger.info(f"Unadjusted start time for {raw.title}: {st}")
+            current_app.logger.info(f"Unadjusted end time for {raw.title}: {et}")
         
+        # Check if this task conflicts with any previously scheduled tasks
+        # and adjust the time if needed
+        st, et, was_adjusted = check_and_adjust_time(st, et, scheduled_slots, raw.title)
+
+        current_app.logger.info(f"Adjusted start time for {raw.title}: {st}")
+        current_app.logger.info(f"Adjusted end time for {raw.title}: {et}")
+        
+        # Get the location for this task
+        if raw.location_id:
+            location = Location.query.filter_by(location_id=raw.location_id).first()
+        
+        # Calculate distance-based transit mode selection
+        calculated_mode = travel_modes[i-1]
+        print(f"!!!!!!!!!!Travel modes: {travel_modes}")
+        print(f"Calculated mode: {calculated_mode}")
+        
+        # Special case: Always use car for airport tasks if available
+        if raw.title and ('airport' in raw.title.lower()) and 'car' in user_transit_modes:
+            calculated_mode = 'car'
+            print(f"Using car for airport task: {raw.title}")
+        elif location and GOOGLE_MAPS_API:
+            try:
+                # Calculate the distance to determine appropriate mode
+                directions = gmaps.directions(
+                    home_address,
+                    location.address,
+                    mode="driving"  # Just to get distance
+                )
+                
+                if directions and len(directions) > 0:
+                    # Extract distance in km
+                    distance_km = directions[0]['legs'][0]['distance']['value'] / 1000
+                    print(f"Distance for {raw.title}: {distance_km:.2f} km")
+                    
+                    # Distance-based mode selection using user preferences
+                    # IMPORTANT: Print what mode we're selecting AND what the display name will be
+                    if distance_km < 1 and 'walking' in user_transit_modes:
+                        calculated_mode = 'walking'
+                        print(f"Short distance ({distance_km:.2f} km): selecting walking mode for {raw.title}")
+                        print(f"Display mode will be: {mode_display_names.get('walking', 'Walking')}")
+                    # elif distance_km < 2 and 'bike' in user_transit_modes:
+                    #     calculated_mode = 'bike'
+                    #     print(f"Medium distance ({distance_km:.2f} km): selecting biking mode for {raw.title}")
+                    #     print(f"Display mode will be: {mode_display_names.get('bike', 'Biking')}")
+                    # elif distance_km < 15 and 'bus_train' in user_transit_modes:
+                    #     calculated_mode = 'bus_train'
+                    #     print(f"Medium-long distance ({distance_km:.2f} km): selecting public transit for {raw.title}")
+                    #     print(f"Display mode will be: {mode_display_names.get('bus_train', 'Public Transit')}")
+                    # elif 'car' in user_transit_modes:
+                    #     calculated_mode = 'car'
+                    #     print(f"Long distance ({distance_km:.2f} km): selecting driving mode for {raw.title}")
+                        # print(f"Display mode will be: {mode_display_names.get('car', 'Driving')}")
+            except Exception as e:
+                print(f"Error calculating distance-based mode for {raw.title}: {e}")
+        
+        # Choose the final transit mode based on priority:
+        # 1. Distance-based calculation (most accurate)
+        # 2. The mode from TSP solution (good estimate)
+        # 3. Default mode (fallback)
+        if calculated_mode:
+            transit_mode = calculated_mode
+            print(f"Using distance-based transit mode for {raw.title}: {transit_mode}")
+        elif travel_modes and i < len(travel_modes):
+            transit_mode = travel_modes[i]
+            print(f"Using TSP-recommended transit mode for {raw.title}: {transit_mode}")
+        else:
+            # If we couldn't determine a mode, use the default
+            transit_mode = default_mode
+            print(f"Using default transit mode for {raw.title}: {transit_mode}")
+        
+        # Fallback to default mode if no appropriate mode was found
+        if not transit_mode:
+            transit_mode = default_mode
+            print(f"Task {raw.title}: Using default transit mode: {transit_mode}")
+
         # Map internal mode names to user-friendly names
         mode_display_names = {
             'car': 'Driving',
@@ -380,23 +398,57 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
             'rideshare': 'Rideshare'
         }
         
-        # Get user-friendly name for the transit mode
+        # For logging only - get user-friendly name for the transit mode
         display_mode = mode_display_names.get(transit_mode, 'Driving') if transit_mode else 'Driving'
+        print(f"Task {raw.title}: Using transit mode {transit_mode} (displays as {display_mode})")
         
-        sched = ScheduledTask(
-            user_id=user.user_id,
-            raw_task_id=raw.raw_task_id,
-            title=raw.title,
-            description=raw.description,
-            location_id=raw.location_id,
-            scheduled_start_time=st,
-            scheduled_end_time=et,
-            status="pending",
-            priority=raw.priority,
-            travel_eta_minutes=travel_time,
-            transit_mode=transit_mode if transit_mode else default_mode  # Store canonical value
-        )
+        # Explicitly handle datetime objects to prevent 'not iterable' errors
+        try:
+            # Make sure start and end times are valid datetime objects
+            if not isinstance(st, datetime) or not isinstance(et, datetime):
+                print(f"Invalid datetime objects for task {raw.title} - st: {type(st)}, et: {type(et)}")
+                # Use current time as fallback
+                current_time = datetime.now()
+                current_app.logger.info(f"Using current time as fallback for task {raw.title}: {current_time.time()}")
+                st = current_time
+                et = current_time + timedelta(minutes=dur)
+            
+            sched = ScheduledTask(
+                user_id=user.user_id,
+                raw_task_id=raw.raw_task_id,
+                title=raw.title,
+                description=raw.description,
+                location_id=raw.location_id,
+                scheduled_start_time=st,
+                scheduled_end_time=et,
+                priority=raw.priority,
+                travel_eta_minutes=travel_time,  # Use the calculated travel time
+                transit_mode=transit_mode  # Store the internal transit mode name
+            )
+        except Exception as dt_err:
+            print(f"Error handling datetime for task {raw.title}: {dt_err}")
+            import traceback
+            print(f"Datetime error traceback: {traceback.format_exc()}")
+            # Create with default times
+            now = datetime.now()
+            sched = ScheduledTask(
+                user_id=user.user_id,
+                raw_task_id=raw.raw_task_id,
+                title=raw.title,
+                description=raw.description,
+                location_id=raw.location_id,
+                scheduled_start_time=now,
+                scheduled_end_time=now + timedelta(minutes=dur),
+                priority=raw.priority,
+                travel_eta_minutes=travel_time,  # Use the calculated travel time
+                transit_mode=transit_mode  # Store the internal transit mode name
+            )
         db.session.add(sched)
+        
+        # Add this task to the scheduled slots to prevent future tasks from overlapping
+        scheduled_slots.append((st, et, raw.title))
+        # Keep the slots sorted by start time
+        scheduled_slots.sort(key=lambda x: x[0])
 
     db.session.commit()
     print("\n✅ Schedule optimized successfully.")
