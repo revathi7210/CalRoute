@@ -7,17 +7,18 @@ from .models import RawTask, ScheduledTask, Location, User, UserPreference
 from .maps_utils import build_distance_matrix, solve_tsp, gmaps, GOOGLE_MAPS_API
 import requests
 import os
+from flask import current_app
 
 optimize_bp = Blueprint("optimize", __name__)
 
 def check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buffer_minutes=15):
     """
     Check if a proposed time slot conflicts with any existing scheduled slots.
-    If conflict found, adjusts the time to avoid overlap.
+    If conflict found, adjusts the time to avoid overlap, and clamps to today.
     
     Args:
-        start_time: Proposed start time for the task
-        end_time: Proposed end time for the task
+        start_time: Proposed start datetime for the task
+        end_time:   Proposed end datetime for the task
         scheduled_slots: List of tuples (start, end, name) of already scheduled tasks
         task_name: Name of the task being scheduled
         buffer_minutes: Buffer time between tasks in minutes
@@ -25,34 +26,47 @@ def check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buff
     Returns:
         Tuple of (adjusted_start_time, adjusted_end_time, was_adjusted)
     """
-    original_start = start_time
-    original_end = end_time
-    duration = (end_time - start_time).total_seconds() / 60
-    
-    # Sort slots by start time to ensure we process them in order
+    # 1) Clamp any "tomorrow" back into today at latest 23:59
+    today = start_time.date()
+    end_of_day = datetime.combine(today, time(23, 59))
+    was_adjusted = False
+
+    if start_time > end_of_day:
+        # push the slot to end exactly at 23:59
+        duration = (end_time - start_time).total_seconds() / 60
+        end_time = end_of_day
+        start_time = end_of_day - timedelta(minutes=duration)
+        was_adjusted = True
+        print(f"⚠️  Clamped {task_name} to today's end: {start_time.time()}–{end_time.time()}")
+
+    # Sort existing slots by start time
     sorted_slots = sorted(scheduled_slots, key=lambda x: x[0])
-    
-    adjusted = False
+
     for slot_start, slot_end, slot_name in sorted_slots:
-        # Check if there's any overlap
+        # 2) Check for overlap
         if start_time < slot_end and end_time > slot_start:
-            print(f"\u26a0\ufe0f Time conflict: {task_name} ({start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}) "
-                  f"conflicts with {slot_name} ({slot_start.strftime('%H:%M')}-{slot_end.strftime('%H:%M')})")
+            print(f"⚠️  Conflict: {task_name} ({start_time.time()}–{end_time.time()}) "
+                  f"with {slot_name} ({slot_start.time()}–{slot_end.time()})")
             
-            # Reschedule to start after the conflicting slot
+            # 3) Push start past that slot + buffer
+            duration = (end_time - start_time).total_seconds() / 60
             start_time = slot_end + timedelta(minutes=buffer_minutes)
-            end_time = start_time + timedelta(minutes=duration)
-            adjusted = True
-            print(f"\u21aa\ufe0f Adjusted to {start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}")
-            
-            # We need to check against all other slots again
+            end_time   = start_time + timedelta(minutes=duration)
+            was_adjusted = True
+            print(f"↪️  Adjusted to {start_time.time()}–{end_time.time()}")
+
+            # 4) **Re-clamp** if that pushed us past midnight
+            if start_time.date() != today or start_time > end_of_day:
+                # same clamp logic as above
+                end_time = end_of_day
+                start_time = end_of_day - timedelta(minutes=duration)
+                print(f"⚠️  Post-adjust clamp for {task_name}: {start_time.time()}–{end_time.time()}")
+
+            # 5) Recurse to check against earlier slots again
             return check_and_adjust_time(start_time, end_time, scheduled_slots, task_name, buffer_minutes)
-    
-    if adjusted:
-        print(f"\u2705 Final schedule for {task_name}: {start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')} "
-              f"(originally {original_start.strftime('%H:%M')}-{original_end.strftime('%H:%M')})")
-    
-    return start_time, end_time, adjusted
+
+    current_app.logger.info(f"Final adjusted time for {task_name}: {start_time.time()}–{end_time.time()}")    
+    return start_time, end_time, was_adjusted
 
 # ... (existing routes) ...
 
@@ -129,12 +143,13 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         # If current time is after 8am, use current time, otherwise start at 8am
         current_minutes = now.hour * 60 + now.minute
         start_minutes = max(current_minutes, default_start_time)
-        time_windows.append((start_minutes, 1440))
+        # clamp end-of-day to 23:59 → minute 1439
+        time_windows.append((start_minutes, 23*60 + 59))
     else:
         locations.append(home_address)
         durations.append(0)
-        time_windows.append((default_start_time, 1440))  # Start at 8am instead of midnight
-
+        # clamp to 23:59 instead of 24:00
+        time_windows.append((default_start_time, 23*60 + 59))
     # Priority list for tasks (lower number = higher priority)
     task_priorities = []
     
@@ -170,7 +185,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     durations.append(0)
     # Allow return to home anytime after 8am
     default_start_time = 8 * 60  # 8:00 AM in minutes
-    time_windows.append((default_start_time, 1440))
+    time_windows.append((default_start_time, 23*60 + 59))
 
     # Fetch user's preferred transit modes from preferences
     user_transit_modes = {mode.mode for mode in pref.transit_modes}
@@ -232,7 +247,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
     db.session.commit()
 
     today = datetime.now().date()
-
+    
     # Map internal mode names to user-friendly names
     mode_display_names = {
         'car': 'Driving',
@@ -282,17 +297,29 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
         # For Google Calendar events, use their original fixed times
         if raw.source == 'google_calendar' and raw.start_time and raw.end_time:
             print(f"Preserving original fixed time for calendar event: {raw.title}")
-            st = raw.start_time
-            et = raw.end_time
+            st = datetime.combine(today, raw.start_time.time())
+            et = datetime.combine(today, raw.end_time.time())
+            current_app.logger.info(f"Unadjusted start time for {raw.title}: {st}")
+            current_app.logger.info(f"Unadjusted end time for {raw.title}: {et}")
         else:
             # For flexible tasks, use the optimized times from TSP solver
             mins = start_times[idx]
-            st = datetime.combine(today, time(mins // 60, mins % 60))
+            day_offset    = mins // (24*60)                    # how many whole days to skip
+            minute_of_day = mins % (24*60)
+            hour          = minute_of_day // 60
+            minute        = minute_of_day % 60
+
+            st = datetime.combine(today + timedelta(days=day_offset),time(hour, minute))
             et = st + timedelta(minutes=dur)
+            current_app.logger.info(f"Unadjusted start time for {raw.title}: {st}")
+            current_app.logger.info(f"Unadjusted end time for {raw.title}: {et}")
         
         # Check if this task conflicts with any previously scheduled tasks
         # and adjust the time if needed
         st, et, was_adjusted = check_and_adjust_time(st, et, scheduled_slots, raw.title)
+
+        current_app.logger.info(f"Adjusted start time for {raw.title}: {st}")
+        current_app.logger.info(f"Adjusted end time for {raw.title}: {et}")
         
         # Get the location for this task
         if raw.location_id:
@@ -382,6 +409,7 @@ def run_optimization(user, current_lat=None, current_lng=None, sync_mode=False):
                 print(f"Invalid datetime objects for task {raw.title} - st: {type(st)}, et: {type(et)}")
                 # Use current time as fallback
                 current_time = datetime.now()
+                current_app.logger.info(f"Using current time as fallback for task {raw.title}: {current_time.time()}")
                 st = current_time
                 et = current_time + timedelta(minutes=dur)
             

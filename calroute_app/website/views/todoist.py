@@ -234,7 +234,7 @@ def parse_and_store_tasks(user):
                 start_time=start_time,
                 end_time=None,
                 due_date=start_time,
-                priority=1,
+                priority=3,
                 duration=45,
                 status='not_completed',
                 is_location_flexible=True,
