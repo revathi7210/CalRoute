@@ -1,6 +1,6 @@
 # CalRoute
 
-An AI‑powered intelligent daily planner that automatically schedules your tasks and events by integrating calendar data, to‑do lists, and real‑time location inputs—optimizing your day for maximum efficiency.
+An AI‑powered intelligent daily planner that automatically schedules your tasks and events by integrating calendar data, to‑do lists, and real‑time location inputs optimizing your day for maximum efficiency.
 
 ---
 
