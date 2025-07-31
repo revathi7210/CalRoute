@@ -4,6 +4,12 @@ An AI‑powered intelligent daily planner that automatically schedules your task
 
 ---
 
+## 📺 Product Demo
+
+Watch CalRoute in action: [▶️ Live Demo](https://www.youtube.com/watch?v=hOq5LrKdn0s&t=12s) 
+
+---
+
 ## 🚀 Features
 
 - **Natural‑Language Task Parsing**  
